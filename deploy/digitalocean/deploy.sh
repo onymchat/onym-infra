@@ -80,6 +80,15 @@ fi
 
 # ─── Create or reuse droplet ──────────────────────────────────────────
 
+DROPLET_NAME="${DROPLET_NAME:-onym-infra}"
+# Idempotent resolution: prefer an explicit DROPLET_ID, otherwise adopt
+# an existing droplet with the stable name. This makes repeat runs —
+# local OR CI (where .env is rebuilt each time and DROPLET_ID may be
+# unset) — update the same box instead of spawning a new one.
+if [ -z "${DROPLET_ID:-}" ] || ! doctl compute droplet get "$DROPLET_ID" &>/dev/null; then
+    DROPLET_ID="$(doctl compute droplet list "$DROPLET_NAME" --format ID --no-header 2>/dev/null | head -1)"
+fi
+
 if [ -n "${DROPLET_ID:-}" ] && doctl compute droplet get "$DROPLET_ID" &>/dev/null; then
     DROPLET_IP="$(doctl compute droplet get "$DROPLET_ID" --format PublicIPv4 --no-header)"
     ok "Reusing droplet $DROPLET_ID ($DROPLET_IP)"
@@ -99,7 +108,6 @@ ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw --force enable
 touch /tmp/cloud-init-done
 CI
 )"
-    DROPLET_NAME="onym-infra-$(date +%s)"
     info "Creating droplet '$DROPLET_NAME' ($DO_DROPLET_SIZE, $DO_REGION)..."
     DROPLET_ID="$(doctl compute droplet create "$DROPLET_NAME" \
         --image ubuntu-24-04-x64 --size "$DO_DROPLET_SIZE" --region "$DO_REGION" \

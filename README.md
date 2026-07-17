@@ -68,10 +68,15 @@ Configure once under **Settings → Secrets and variables → Actions**:
   `DOMAIN`, `NOSTR_HOST`, `BLOSSOM_HOST`, `RELAYER_HOST`, `CADDY_EMAIL`,
   `DO_REGION`, `DO_DROPLET_SIZE`, and `DROPLET_ID`.
 
-`SSH_PRIVATE_KEY` must be the key the droplet is created with. On the
-first run leave `DROPLET_ID` unset — the job creates the box and prints
-its ID in the run summary; set the `DROPLET_ID` variable to that value
-so later runs reuse the same droplet instead of creating new ones.
+Re-runs are idempotent: `deploy.sh` reuses the existing droplet named
+`onym-infra` (adopting it by name), so repeat CI runs **update** the box
+rather than creating new ones — even though CI rebuilds `.env` each run.
+Setting the `DROPLET_ID` variable is optional; it just skips the
+name lookup. DNS records are upserted, not duplicated.
+
+`SSH_PRIVATE_KEY` must be a key the droplet trusts. On the very first
+deploy the droplet is created with it; on later runs the same key must
+still be authorized (use the same secret across runs).
 
 ## Operating
 
