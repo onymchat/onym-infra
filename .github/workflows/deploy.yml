@@ -1,0 +1,86 @@
+name: Deploy
+
+# Deploys the consolidated onym.app stack (Caddy + strfry + blossom +
+# relayer) to DigitalOcean by running deploy/digitalocean/deploy.sh with
+# config sourced from repo Secrets/Variables instead of a local .env.
+# Manual trigger only — infra changes should be deliberate.
+#
+# Required repository SECRETS:
+#   DO_API_KEY          DigitalOcean API token
+#   CF_API_TOKEN        Cloudflare token with DNS:Edit on the onym.app zone
+#   SSH_PRIVATE_KEY     Private key the droplet is created with / trusts
+#   RELAYER_SECRET_KEY  Stellar secret key (S...)
+#   RELAYER_AUTH_TOKENS (optional) comma-separated bearer tokens
+#
+# Repository VARIABLES (optional — defaults shown in the workflow):
+#   DOMAIN, NOSTR_HOST, BLOSSOM_HOST, RELAYER_HOST, CADDY_EMAIL,
+#   DO_REGION, DO_DROPLET_SIZE
+#   DROPLET_ID          set this after the first run (printed in the job
+#                       summary) so subsequent runs reuse the same box
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with relayer submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DO_API_KEY }}
+
+      - name: Install dig
+        run: sudo apt-get update && sudo apt-get install -y dnsutils rsync
+
+      - name: Write SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > ~/.ssh/deploy_key.pub
+
+      - name: Write config files
+        env:
+          DO_API_KEY: ${{ secrets.DO_API_KEY }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          RELAYER_SECRET_KEY: ${{ secrets.RELAYER_SECRET_KEY }}
+          RELAYER_AUTH_TOKENS: ${{ secrets.RELAYER_AUTH_TOKENS }}
+        run: |
+          cat > .env <<EOF
+          DO_API_KEY=$DO_API_KEY
+          CF_API_TOKEN=$CF_API_TOKEN
+          DOMAIN=${{ vars.DOMAIN || 'onym.app' }}
+          NOSTR_HOST=${{ vars.NOSTR_HOST || 'nostr.onym.app' }}
+          BLOSSOM_HOST=${{ vars.BLOSSOM_HOST || 'blossom.onym.app' }}
+          RELAYER_HOST=${{ vars.RELAYER_HOST || 'relayer.onym.app' }}
+          CADDY_EMAIL=${{ vars.CADDY_EMAIL || 'rinat@qda.one' }}
+          DO_REGION=${{ vars.DO_REGION || 'ams3' }}
+          DO_DROPLET_SIZE=${{ vars.DO_DROPLET_SIZE || 's-1vcpu-2gb' }}
+          SSH_KEY_PATH=$HOME/.ssh/deploy_key
+          DROPLET_ID=${{ vars.DROPLET_ID }}
+          DROPLET_IP=
+          EOF
+          cat > relayer.env <<EOF
+          RELAYER_SECRET_KEY=$RELAYER_SECRET_KEY
+          RELAYER_AUTH_TOKENS=$RELAYER_AUTH_TOKENS
+          EOF
+
+      - name: Deploy
+        run: ./deploy/digitalocean/deploy.sh
+
+      - name: Summary (set DROPLET_ID variable from this to reuse the box)
+        if: always()
+        run: |
+          echo "### Deploy" >> "$GITHUB_STEP_SUMMARY"
+          grep '^DROPLET_' .env 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true

@@ -52,6 +52,27 @@ so re-runs reuse the box.
 - **Relayer code:** bump the submodule (`git -C relayer pull`), commit,
   re-run `deploy.sh` (rebuilds the image).
 
+## Deploy via GitHub Actions
+
+`.github/workflows/deploy.yml` runs the same `deploy.sh` from CI
+(manual `workflow_dispatch`). It writes `.env` / `relayer.env` from repo
+Secrets/Variables, so nothing sensitive is committed. This is the
+relayer's deployment path now — the `onym-relayer` repo only publishes
+`relayers.json`; it no longer deploys a droplet.
+
+Configure once under **Settings → Secrets and variables → Actions**:
+
+- **Secrets:** `DO_API_KEY`, `CF_API_TOKEN`, `SSH_PRIVATE_KEY`,
+  `RELAYER_SECRET_KEY`, and optionally `RELAYER_AUTH_TOKENS`.
+- **Variables** (all optional; defaults in the workflow):
+  `DOMAIN`, `NOSTR_HOST`, `BLOSSOM_HOST`, `RELAYER_HOST`, `CADDY_EMAIL`,
+  `DO_REGION`, `DO_DROPLET_SIZE`, and `DROPLET_ID`.
+
+`SSH_PRIVATE_KEY` must be the key the droplet is created with. On the
+first run leave `DROPLET_ID` unset — the job creates the box and prints
+its ID in the run summary; set the `DROPLET_ID` variable to that value
+so later runs reuse the same droplet instead of creating new ones.
+
 ## Operating
 
 ```bash
@@ -70,3 +91,6 @@ docker compose logs -f relayer
 - After the new box is verified, destroy the old `onym-chat` droplet.
 - App-side follow-up: point the client's `relayers.json` and the Nostr
   relay seed at the `*.onym.app` hosts.
+- Deploy ownership moved here: the `onym-relayer` `Release` workflow was
+  trimmed to publish `relayers.json` only; this repo's `Deploy` workflow
+  owns standing up the relayer (with nostr + blossom) on the box.
