@@ -1,0 +1,3 @@
+[submodule "relayer"]
+	path = relayer
+	url = https://github.com/onymchat/onym-relayer.git

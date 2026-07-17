@@ -1,0 +1,76 @@
+name: onym-infra
+
+# Consolidated onym.app backend: Nostr relay (strfry), Blossom media
+# server, and the Soroban contract relayer — all behind Caddy, which
+# terminates TLS and provisions/renews Let's Encrypt certificates
+# automatically (no certbot sidecar, no cron, no manual renewal).
+#
+# Hostnames are env-driven (see .env) so the same stack can serve a
+# staging domain without edits. Caddy reaches each service by its
+# compose name over the private `internal` network; only Caddy
+# publishes ports to the host.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3 (QUIC)
+    environment:
+      # Consumed by the Caddyfile via {$VAR} substitution at load time.
+      - CADDY_EMAIL=${CADDY_EMAIL:-}
+      - NOSTR_HOST=${NOSTR_HOST:-nostr.onym.app}
+      - BLOSSOM_HOST=${BLOSSOM_HOST:-blossom.onym.app}
+      - RELAYER_HOST=${RELAYER_HOST:-relayer.onym.app}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Persists issued certificates + ACME account across restarts.
+      # Losing this volume just means Caddy re-issues on next boot.
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [internal]
+    depends_on: [nostr-relay, blossom, relayer]
+
+  nostr-relay:
+    image: dockurr/strfry:latest
+    restart: unless-stopped
+    volumes:
+      - ./strfry/strfry.conf:/etc/strfry.conf:ro
+      - strfry-data:/app/strfry-db
+    networks: [internal]
+
+  blossom:
+    image: ghcr.io/hzrd149/blossom-server:latest
+    restart: unless-stopped
+    environment:
+      - DATA_DIR=/app/data
+      - PORT=3000
+    volumes:
+      - blossom-data:/app/data
+    networks: [internal]
+
+  relayer:
+    build:
+      context: ./relayer
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Secrets (RELAYER_SECRET_KEY, RELAYER_AUTH_TOKENS, RPC URLs) live
+    # in relayer.env — never committed. See relayer.env.example.
+    env_file: ./relayer.env
+    environment:
+      # Bind on all interfaces inside the container so Caddy can reach
+      # it; the port is NOT published to the host.
+      - RELAYER_BIND=0.0.0.0:8080
+    networks: [internal]
+
+volumes:
+  caddy-data:
+  caddy-config:
+  strfry-data:
+  blossom-data:
+
+networks:
+  internal:
+    driver: bridge

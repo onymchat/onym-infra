@@ -1,0 +1,33 @@
+# Caddy handles TLS automatically for each site below: it obtains a
+# Let's Encrypt certificate on first request and renews it well before
+# expiry. No certbot, no cron. For this to work the three hostnames
+# must resolve to this host and be DNS-only (grey-cloud) in Cloudflare
+# so the ACME challenge reaches Caddy directly.
+#
+# reverse_proxy transparently forwards WebSocket upgrades, so the Nostr
+# `wss://` and Blossom paths need no special directives.
+{
+	email {$CADDY_EMAIL}
+}
+
+# Nostr relay (strfry) — long-lived WebSocket connections. strfry reads
+# the client IP from x-real-ip (see strfry.conf realIpHeader), which
+# Caddy doesn't send by default, so set it explicitly.
+{$NOSTR_HOST} {
+	reverse_proxy nostr-relay:7777 {
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# Blossom media/blob server — allow large uploads (images, video).
+{$BLOSSOM_HOST} {
+	request_body {
+		max_size 100MB
+	}
+	reverse_proxy blossom:3000
+}
+
+# Soroban contract relayer.
+{$RELAYER_HOST} {
+	reverse_proxy relayer:8080
+}

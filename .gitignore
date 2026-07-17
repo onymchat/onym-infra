@@ -1,0 +1,7 @@
+# Secrets — never commit
+.env
+relayer.env
+
+# Local noise
+*.log
+.DS_Store
