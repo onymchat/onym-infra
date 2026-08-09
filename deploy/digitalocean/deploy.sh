@@ -275,8 +275,9 @@ check "https://$NOSTR_HOST/"   "nostr"     # expect 400/426 on plain GET = up
 check_health "https://$MODERATION_HOST/health" "moderation" "Check: docker compose logs moderation"
 check_health "https://$AUTHORITY_HOST/health"  "authority"  "Check: docker compose logs authority"
 # A term nobody can read is a term nobody agreed to, so the published
-# documents are checked like a service rather than assumed.
-check_health "https://$AUTHORITY_HOST/policy/classes" "policy documents" \
+# documents are checked like a service rather than assumed. /policy/csam
+# is one of the nine the manifest links to, and the heaviest.
+check_health "https://$AUTHORITY_HOST/policy/csam" "policy documents" \
     "The manifest links here; a 404 means the submodule is not checked out on the droplet."
 
 echo

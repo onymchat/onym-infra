@@ -96,25 +96,37 @@ two-pass affair:
    `MODERATION_ENFORCE_SIGNATURES=true`, and re-run.
 3. The manifest's `operator` field must name the public half of
    `AUTHORITY_SIGNING_SEED`, and the authority **refuses to start**
-   when they disagree. It is published upstream with a placeholder, so
-   the key has to be written into the manifest in `onym-moderation`
-   and the submodule bumped — this is not something to set here. The
-   value is in the `authority starting` log line as `signing_key`.
+   when they disagree — an authority whose verdicts nobody can verify
+   is worse than one that is plainly down. It ships with a placeholder
+   of all zeros, so derive the key and put it in the manifest
+   *upstream*, then bump the submodule. It is not something to set in
+   this repo.
+
+   ```bash
+   openssl rand -hex 32   # the seed itself → AUTHORITY_SIGNING_SEED secret
+   AUTHORITY_SIGNING_SEED=<seed> onym-moderation-authority derive-operator-key
+   # → onym:key:…  goes in manifest.json's `operator` field
+   ```
+
+   The subcommand runs before any manifest or store is read, precisely
+   because neither is configured yet — you do not have to start the
+   service, watch it exit, and read the key out of a log line.
 
 ## The published policy documents
 
 The manifest's terms link to `https://authority.onym.app/policy/…` —
-seven documents that a user reads *before* consenting. A 404 there
-means the term was never published, so Caddy serves them from
-`moderation/authority/published/` rather than leaving them to the
-application, which routes only `/manifest.json` and `/v1/*`.
+nine documents a user reads *before* consenting, one per term and one
+per violation class. A 404 there means the term was never published,
+so Caddy serves them from `moderation/authority/published/` rather
+than leaving them to the application, which routes only
+`/manifest.json` and `/v1/*`.
 
-They are served as raw Markdown (`text/markdown; charset=utf-8`). That
-is honest about what the bytes are, but the manifest addresses the
-three violation classes by fragment — `/policy/classes#csam` — and
-fragments address HTML elements, so those anchors currently resolve to
-nothing more specific than the top of the document. See the pull
-request that added this: it is an open decision, not a finished one.
+There are no `#fragment` links: each class is its own document, so a
+`definition` URL resolves to exactly the text it names. The documents
+are served as the published Markdown itself
+(`text/markdown; charset=utf-8`) rather than rendered to HTML — these
+are the bytes that were signed off, and serving them verbatim keeps
+what a user reads identical to what was reviewed.
 
 ## Deploy via GitHub Actions
 

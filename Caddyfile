@@ -46,26 +46,25 @@
 # to check a mandate's pinned hash against what this authority
 # publishes.
 {$AUTHORITY_HOST} {
-	# The manifest links out to the documents its terms are written in
-	# — /policy/classes#csam, /policy/evidence-rules, and five more.
-	# Those are what a user reads *before* consenting, so a 404 here
-	# means the term was never published and nobody agreed to it. The
-	# authority itself serves only /manifest.json and /v1/*, which
+	# The manifest links out to the nine documents its terms are
+	# written in — /policy/csam, /policy/evidence-rules, and seven
+	# more. Those are what a user reads *before* consenting, so a 404
+	# here means the term was never published and nobody agreed to it.
+	# The authority itself serves only /manifest.json and /v1/*, which
 	# leaves the routing to Caddy.
 	handle_path /policy/* {
 		root * /srv/policy
-		# The manifest's URLs carry no extension, and `#csam` is a
-		# fragment within classes.md rather than a document of its own.
+		# The manifest's URLs carry no extension. They carry no
+		# fragments either: every term, including each violation class,
+		# is its own document, so a link resolves to exactly the text
+		# it names and nothing depends on anchors.
 		try_files {path} {path}.md
 		# Caddy's MIME table has no entry for .md, so without this the
 		# browser is handed application/octet-stream and downloads the
-		# terms instead of showing them. This serves the published
-		# Markdown as-is: honest about what the bytes are, but it does
-		# mean the manifest's `#csam` style fragments do not resolve to
-		# anything, because fragments address HTML elements. See the
-		# open question in the pull request — rendering these to HTML
-		# at deploy time, or giving each class its own document, are
-		# both live options and both are a decision rather than a fix.
+		# terms instead of showing them. The documents go out as the
+		# published Markdown itself rather than as rendered HTML: these
+		# are the bytes that were signed off, and serving them verbatim
+		# keeps what a user reads identical to what was reviewed.
 		header Content-Type "text/markdown; charset=utf-8"
 		file_server
 	}
