@@ -37,6 +37,11 @@ services:
       - AUTHORITY_HOST=${AUTHORITY_HOST:-authority.onym.app}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # The authority's published policy documents, served under
+      # /policy/. They are terms a user reads before consenting rather
+      # than application data, and the authority serves only
+      # /manifest.json and /v1/*, so Caddy is what routes them.
+      - ./moderation/authority/published:/srv/policy:ro
       # Persists issued certificates + ACME account across restarts.
       # Losing this volume just means Caddy re-issues on next boot.
       - caddy-data:/data
@@ -157,14 +162,12 @@ services:
       # Losing this loses the record behind every mark the interface is
       # holding — and an accused person's evidence that a case existed.
       - authority-data:/data
-      # The published manifest, served byte-for-byte because users'
-      # mandates pin the SHA-256 of these exact bytes. Editing this
-      # file after anyone has consented silently invalidates their
-      # mandates. The directory is empty in a fresh onym-moderation
-      # checkout — the manifest is the operator's published document,
-      # not the upstream repo's — so put yours at
-      # moderation/authority/manifest/manifest.json before deploying,
-      # starting from moderation/authority/manifest.example.json.
+      # The published manifest, which ships in the submodule and is
+      # served byte-for-byte because users' mandates pin the SHA-256 of
+      # these exact bytes. Editing this file after anyone has consented
+      # silently invalidates their mandates, so it is read-only here
+      # and should be changed only by publishing a new manifest
+      # upstream and bumping the submodule.
       - ./moderation/authority/manifest:/manifest:ro
     networks: [internal]
 

@@ -46,5 +46,29 @@
 # to check a mandate's pinned hash against what this authority
 # publishes.
 {$AUTHORITY_HOST} {
+	# The manifest links out to the documents its terms are written in
+	# — /policy/classes#csam, /policy/evidence-rules, and five more.
+	# Those are what a user reads *before* consenting, so a 404 here
+	# means the term was never published and nobody agreed to it. The
+	# authority itself serves only /manifest.json and /v1/*, which
+	# leaves the routing to Caddy.
+	handle_path /policy/* {
+		root * /srv/policy
+		# The manifest's URLs carry no extension, and `#csam` is a
+		# fragment within classes.md rather than a document of its own.
+		try_files {path} {path}.md
+		# Caddy's MIME table has no entry for .md, so without this the
+		# browser is handed application/octet-stream and downloads the
+		# terms instead of showing them. This serves the published
+		# Markdown as-is: honest about what the bytes are, but it does
+		# mean the manifest's `#csam` style fragments do not resolve to
+		# anything, because fragments address HTML elements. See the
+		# open question in the pull request — rendering these to HTML
+		# at deploy time, or giving each class its own document, are
+		# both live options and both are a decision rather than a fix.
+		header Content-Type "text/markdown; charset=utf-8"
+		file_server
+	}
+
 	reverse_proxy authority:8080
 }

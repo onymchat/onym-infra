@@ -47,14 +47,17 @@ grep -qE '^MODERATION_INTERFACE_SIGNING_SEED=[0-9a-fA-F]{64}$' "$MODERATION_ENV"
 grep -qE '^AUTHORITY_SIGNING_SEED=[0-9a-fA-F]{64}$' "$AUTHORITY_ENV" \
     || { err "authority.env: AUTHORITY_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
 
-# The authority serves its manifest byte-for-byte because users'
-# mandates pin its SHA-256, so it is the operator's published document
-# rather than something the onym-moderation checkout carries. Without
-# it that one container starts and immediately exits — which is worth
-# saying out loud here, but not worth refusing to deploy the other five
-# services over.
+# The manifest and the policy documents ship in the submodule, so if
+# they are missing the submodule was never checked out — `git submodule
+# update --init --recursive`. It is worth catching, because the failure
+# is quiet in two different ways: the authority exits at boot without
+# its manifest, and Caddy just 404s every /policy/ URL, which turns the
+# terms a user has to read before consenting into a dead link. Neither
+# is worth refusing to deploy the other five services over, so warn.
 [ -f "$REPO_ROOT/moderation/authority/manifest/manifest.json" ] \
-    || warn "moderation/authority/manifest/manifest.json is missing — the authority will not start. Copy moderation/authority/manifest.example.json there and re-run."
+    || warn "moderation/authority/manifest/manifest.json is missing (submodule not checked out?) — the authority will not start."
+[ -d "$REPO_ROOT/moderation/authority/published" ] \
+    || warn "moderation/authority/published/ is missing (submodule not checked out?) — the manifest's /policy/ URLs will 404."
 
 : "${DO_API_KEY:?set DO_API_KEY in .env}"
 : "${CF_API_TOKEN:?set CF_API_TOKEN in .env}"
@@ -253,23 +256,28 @@ check() {
     code="$(curl -o /dev/null -s -w '%{http_code}' --max-time 15 "$url" 2>/dev/null || echo 000)"
     if [ "$code" != "000" ]; then ok "  $label — HTTP $code (TLS OK)"; else warn "  $label — no response yet (cert may still be issuing)"; fi
 }
-# The moderation services expose a real /health, so "anything but 000"
-# is not good enough for them: a 502 means Caddy is up and the service
-# behind it is not, which is exactly the failure worth catching.
+# The moderation endpoints have a right answer, so "anything but 000"
+# is not good enough for them: a 502 means Caddy is up and the thing
+# behind it is not, and a 404 on a policy URL means a published term is
+# unreachable. Both are exactly the failures worth catching.
 check_health() {
-    local url="$1" label="$2" code
+    local url="$1" label="$2" hint="${3:-}" code
     code="$(curl -o /dev/null -s -w '%{http_code}' --max-time 15 "$url" 2>/dev/null || echo 000)"
     case "$code" in
-        200) ok "  $label — HTTP 200 (healthy)" ;;
+        200) ok "  $label — HTTP 200" ;;
         000) warn "  $label — no response yet (cert may still be issuing)" ;;
-        *)   warn "  $label — HTTP $code, expected 200. Check: docker compose logs $label" ;;
+        *)   warn "  $label — HTTP $code, expected 200.${hint:+ $hint}" ;;
     esac
 }
 check "https://$RELAYER_HOST/" "relayer"   # expect 401/422 (auth/validation) = up
 check "https://$BLOSSOM_HOST/" "blossom"
 check "https://$NOSTR_HOST/"   "nostr"     # expect 400/426 on plain GET = up
-check_health "https://$MODERATION_HOST/health" "moderation"
-check_health "https://$AUTHORITY_HOST/health"  "authority"
+check_health "https://$MODERATION_HOST/health" "moderation" "Check: docker compose logs moderation"
+check_health "https://$AUTHORITY_HOST/health"  "authority"  "Check: docker compose logs authority"
+# A term nobody can read is a term nobody agreed to, so the published
+# documents are checked like a service rather than assumed.
+check_health "https://$AUTHORITY_HOST/policy/classes" "policy documents" \
+    "The manifest links here; a 404 means the submodule is not checked out on the droplet."
 
 echo
 ok "Done. Droplet $DROPLET_ID @ $DROPLET_IP"

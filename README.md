@@ -41,15 +41,14 @@ cp relayer.env.example relayer.env          # RELAYER_SECRET_KEY (required), REL
 cp moderation.env.example moderation.env    # DeviceCheck key + ids, interface signing seed...
 cp authority.env.example authority.env      # AUTHORITY_SIGNING_SEED (required), tokens...
 
-# The authority serves its manifest byte-for-byte, because users'
-# mandates pin its SHA-256. It is your published document, so it is not
-# in the submodule — put yours here before deploying.
-mkdir -p moderation/authority/manifest
-cp moderation/authority/manifest.example.json \
-   moderation/authority/manifest/manifest.json
-
 ./deploy/digitalocean/deploy.sh
 ```
+
+The authority's published manifest and the policy documents its terms
+link to ship in the `moderation` submodule, so there is nothing to
+copy into place — but the submodule does have to be checked out
+(`git submodule update --init --recursive` if you cloned without
+`--recurse-submodules`). `deploy.sh` warns if either is missing.
 
 The script creates (or reuses) an `s-1vcpu-2gb` droplet, adds a 2 GB
 swapfile so the Rust builds don't OOM, creates **DNS-only** (grey-cloud)
@@ -75,15 +74,17 @@ the box.
   re-run `deploy.sh` (rebuilds the image).
 - **Moderation code:** same shape — `git -C moderation pull`, commit,
   re-run `deploy.sh`.
-- **The authority manifest:** editing
-  `moderation/authority/manifest/manifest.json` after anyone has
-  consented silently invalidates their mandates, because a mandate pins
-  the SHA-256 of those exact bytes. Republish deliberately.
+- **The authority manifest and policy documents:** both live in the
+  submodule, so they change by bumping it. Note that editing
+  `manifest.json` after anyone has consented silently invalidates their
+  mandates, because a mandate pins the SHA-256 of those exact bytes —
+  changing the terms means publishing a *new* manifest and taking fresh
+  mandates against it.
 
 ## Bringing the moderation services up for the first time
 
-Two values only exist after a boot, so the first deploy is a two-pass
-affair:
+Three things only settle after a boot, so the first deploy is a
+two-pass affair:
 
 1. Deploy with `MODERATION_ENFORCE_SIGNATURES=false` and
    `AUTHORITY_INTERFACE_KEY=` empty. Until signatures are enforced,
@@ -93,6 +94,27 @@ affair:
    (`docker compose logs moderation`, the `interface countersigning
    key` line), set it as `AUTHORITY_INTERFACE_KEY`, set
    `MODERATION_ENFORCE_SIGNATURES=true`, and re-run.
+3. The manifest's `operator` field must name the public half of
+   `AUTHORITY_SIGNING_SEED`, and the authority **refuses to start**
+   when they disagree. It is published upstream with a placeholder, so
+   the key has to be written into the manifest in `onym-moderation`
+   and the submodule bumped — this is not something to set here. The
+   value is in the `authority starting` log line as `signing_key`.
+
+## The published policy documents
+
+The manifest's terms link to `https://authority.onym.app/policy/…` —
+seven documents that a user reads *before* consenting. A 404 there
+means the term was never published, so Caddy serves them from
+`moderation/authority/published/` rather than leaving them to the
+application, which routes only `/manifest.json` and `/v1/*`.
+
+They are served as raw Markdown (`text/markdown; charset=utf-8`). That
+is honest about what the bytes are, but the manifest addresses the
+three violation classes by fragment — `/policy/classes#csam` — and
+fragments address HTML elements, so those anchors currently resolve to
+nothing more specific than the top of the document. See the pull
+request that added this: it is an open decision, not a finished one.
 
 ## Deploy via GitHub Actions
 
