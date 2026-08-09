@@ -147,11 +147,12 @@ manifest soft-verified.
 `deploy.sh` produces it on every deploy: the manifest is materialized
 to a staging name, signed **inside the authority image** (the seed
 never leaves `authority.env`, same as `derive-operator-key`), and only
-then are manifest and signature moved into place — manifest first, so
-at every instant the published signature either matches the published
-manifest or is absent. The previous signature is retired before
-materializing, which makes the worst half-deploy outcome a 404
-(soft-verify) rather than a signature that covers different bytes.
+then is the live pair touched — old signature retired, new manifest
+moved into place, new signature written last. A signing failure leaves
+the previous manifest+signature pair fully intact; any later
+interruption degrades to a missing signature (404 → soft-verify). At
+no instant can the published signature cover different bytes than the
+published manifest.
 
 Wire contract, pinned here because two repos depend on it: the body is
 **base64 of the 64-byte raw signature, plus a trailing LF** — 89 bytes

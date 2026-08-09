@@ -270,10 +270,11 @@ fi
 # covers different bytes": a stale .sig next to new manifest bytes
 # looks healthy (the running authority serves its in-memory copy) and
 # detonates on the next container restart, when every hard-verifying
-# client rejects the manifest at once. So: retire the old signature
-# first, materialize to a staging name, sign the staged bytes, and
-# only then move manifest and signature into place.
-ssh_do "rm -f /opt/onym-infra/runtime/authority-manifest/manifest.json.sig"
+# client rejects the manifest at once. Ordering: materialize to a
+# staging name, sign the staged bytes, and only THEN touch the live
+# pair — so a signing failure (image predating sign-manifest, docker
+# hiccup) leaves the previous manifest+signature pair fully intact,
+# and any later interruption degrades to a missing signature.
 ssh_do "python3 /opt/onym-infra/deploy/digitalocean/materialize-authority-manifest.py \
     /opt/onym-infra/moderation/authority/manifest/manifest.json \
     /opt/onym-infra/runtime/authority-manifest/manifest.json.next \
@@ -291,15 +292,16 @@ if ! MANIFEST_SIG="$(ssh_do "cd /opt/onym-infra && docker compose run --rm --no-
     authority onym-moderation-authority sign-manifest /manifest/manifest.json.next")"; then
     err "authority could not sign the manifest; is the image built from a"
     err "moderation submodule that has the sign-manifest subcommand?"
-    err "(The old signature was already retired: clients soft-verify"
-    err "until a deploy completes — no stale pair was left behind.)"
+    err "(The live manifest and its signature were not touched.)"
     exit 1
 fi
 [[ "$MANIFEST_SIG" =~ ^[A-Za-z0-9+/]{86}==$ ]] \
     || { err "authority returned an invalid manifest signature: $MANIFEST_SIG"; exit 1; }
-# Manifest first, then its signature: at every instant the published
-# signature either matches the published manifest or is absent.
-ssh_do "mv /opt/onym-infra/runtime/authority-manifest/manifest.json.next \
+# Retire the old signature, publish the new manifest, then its
+# signature — at every instant the published signature either matches
+# the published manifest or is absent.
+ssh_do "rm -f /opt/onym-infra/runtime/authority-manifest/manifest.json.sig \
+    && mv /opt/onym-infra/runtime/authority-manifest/manifest.json.next \
           /opt/onym-infra/runtime/authority-manifest/manifest.json \
     && printf '%s\n' '$MANIFEST_SIG' > /opt/onym-infra/runtime/authority-manifest/manifest.json.sig.tmp \
     && mv /opt/onym-infra/runtime/authority-manifest/manifest.json.sig.tmp \
@@ -358,21 +360,38 @@ check_health "https://$AUTHORITY_HOST/manifest.json.sig" "manifest signature" \
 # this deploy produced — the served signature must be the one just
 # minted, over manifest bytes identical to the file it signed. (No
 # local crypto needed: sig == minted sig AND served bytes == signed
-# bytes ⇒ the signature verifies.)
+# bytes ⇒ the signature verifies.) Every remote/network command below
+# is `|| true`-guarded: under `set -e` a transient failure here would
+# otherwise abort a deploy that already succeeded, with no message.
 SERVED_SIG="$(curl -fsS --max-time 15 "https://$AUTHORITY_HOST/manifest.json.sig" 2>/dev/null | tr -d '[:space:]' || true)"
-if [ -n "$SERVED_SIG" ]; then
+SERVED_MANIFEST="$(curl -fsS --max-time 15 "https://$AUTHORITY_HOST/manifest.json" 2>/dev/null || true)"
+if [ -n "$SERVED_SIG" ] && [ -n "$SERVED_MANIFEST" ]; then
+    PAIR_OK=1
     if [ "$SERVED_SIG" != "$MANIFEST_SIG" ]; then
         err "  served manifest.json.sig differs from the signature this deploy produced."
-        HEALTH_FAILURES=1
+        HEALTH_FAILURES=1; PAIR_OK=0
     fi
-    SERVED_MANIFEST_HASH="$(curl -fsS --max-time 15 "https://$AUTHORITY_HOST/manifest.json" 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)"
-    SIGNED_MANIFEST_HASH="$(ssh_do "shasum -a 256 /opt/onym-infra/runtime/authority-manifest/manifest.json | cut -d' ' -f1")"
-    if [ -n "$SERVED_MANIFEST_HASH" ] && [ "$SERVED_MANIFEST_HASH" != "$SIGNED_MANIFEST_HASH" ]; then
+    # Hash the captured body (hashing a failed curl's empty stdin
+    # yields the well-known empty hash and a misleading mismatch).
+    # `shasum` locally (macOS has no sha256sum); `sha256sum` remotely
+    # (coreutils is guaranteed on the droplet; perl's shasum is not).
+    SERVED_MANIFEST_HASH="$(printf '%s' "$SERVED_MANIFEST" | shasum -a 256 | cut -d' ' -f1)"
+    SIGNED_MANIFEST_HASH="$(ssh_do "sha256sum /opt/onym-infra/runtime/authority-manifest/manifest.json | cut -d' ' -f1" || true)"
+    if [ -z "$SIGNED_MANIFEST_HASH" ]; then
+        warn "  could not hash the signed manifest on the droplet; served-pair check incomplete."
+        PAIR_OK=0
+    elif [ "$SERVED_MANIFEST_HASH" != "$SIGNED_MANIFEST_HASH" ]; then
         err "  served manifest.json differs from the bytes the signature covers"
         err "  (the authority is still serving its previous in-memory manifest?)."
-        HEALTH_FAILURES=1
+        HEALTH_FAILURES=1; PAIR_OK=0
     fi
-    [ "$HEALTH_FAILURES" -eq 0 ] && ok "  manifest signature covers the served bytes"
+    if [ "$PAIR_OK" -eq 1 ]; then
+        ok "  manifest signature covers the served bytes"
+    fi
+else
+    # A green deploy must never be mistaken for a verified pair: this
+    # check is the precondition for enforceManifestSignatures.
+    warn "  manifest signature NOT verified — could not fetch the served pair (cert may still be issuing)."
 fi
 
 [ "$HEALTH_FAILURES" -eq 0 ] \
