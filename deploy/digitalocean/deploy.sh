@@ -73,6 +73,8 @@ grep -qE '^AUTHORITY_ADMIN_TOKEN=.+$' "$AUTHORITY_ENV" \
 : "${CADDY_EMAIL:?set CADDY_EMAIL in .env}"
 [[ "$AUTHORITY_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
     || { err "AUTHORITY_HOST must be a hostname without a scheme or path."; exit 1; }
+[[ "$MODERATION_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
+    || { err "MODERATION_HOST must be a hostname without a scheme or path."; exit 1; }
 DO_REGION="${DO_REGION:-ams3}"
 DO_DROPLET_SIZE="${DO_DROPLET_SIZE:-s-1vcpu-2gb}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
@@ -83,16 +85,11 @@ SSH_KEY_PATH="${SSH_KEY_PATH/#\~/$HOME}"
 HOSTS=("$NOSTR_HOST" "$BLOSSOM_HOST" "$RELAYER_HOST" "$MODERATION_HOST" "$AUTHORITY_HOST")
 
 save_env() {
-    # Rewrite the values this run resolved in place, preserving
-    # everything else. The two moderation hostnames are written back
-    # alongside DROPLET_ID / DROPLET_IP so a .env that predates them
-    # ends up recording what was actually deployed rather than leaving
-    # the next reader to guess.
+    # Rewrite only the droplet identity this run resolved, preserving
+    # every configured value and its explanatory comments in place.
     local tmp; tmp="$(mktemp)"
-    grep -vE '^(DROPLET_ID|DROPLET_IP|MODERATION_HOST|AUTHORITY_HOST)=' "$ENV_FILE" > "$tmp" || true
+    grep -vE '^(DROPLET_ID|DROPLET_IP)=' "$ENV_FILE" > "$tmp" || true
     {
-        echo "MODERATION_HOST=$MODERATION_HOST"
-        echo "AUTHORITY_HOST=$AUTHORITY_HOST"
         echo "DROPLET_ID=${DROPLET_ID:-}"
         echo "DROPLET_IP=${DROPLET_IP:-}"
     } >> "$tmp"
@@ -222,6 +219,7 @@ rsync -az --delete \
     -e "ssh ${SSH_OPTS[*]}" \
     --exclude '.git' --exclude 'relayer/target' \
     --exclude 'moderation/apple/target' --exclude 'moderation/authority/target' \
+    --exclude 'runtime/' \
     --exclude '.env' \
     --exclude 'relayer.env' --exclude 'moderation.env' --exclude 'authority.env' \
     --exclude '*.log' --exclude '.DS_Store' \
@@ -258,7 +256,11 @@ ssh_do "cd /opt/onym-infra && mkdir -p runtime/authority-manifest && COMPOSE_PAR
 # the built image, then materialize the exact manifest this authority
 # will publish. The seed never leaves authority.env or the container.
 info "Materializing authority manifest for $AUTHORITY_HOST..."
-OPERATOR_KEY="$(ssh_do "cd /opt/onym-infra && docker compose run --rm --no-deps authority derive-operator-key")"
+if ! OPERATOR_KEY="$(ssh_do "cd /opt/onym-infra && docker compose run --rm --no-deps \
+    authority onym-moderation-authority derive-operator-key")"; then
+    err "authority could not derive its operator key; check AUTHORITY_SIGNING_SEED."
+    exit 1
+fi
 [[ "$OPERATOR_KEY" =~ ^onym:key:[0-9a-f]{64}$ ]] \
     || { err "authority returned an invalid operator key: $OPERATOR_KEY"; exit 1; }
 ssh_do "python3 /opt/onym-infra/deploy/digitalocean/materialize-authority-manifest.py \
@@ -268,7 +270,10 @@ ssh_do "python3 /opt/onym-infra/deploy/digitalocean/materialize-authority-manife
 ok "Authority manifest names $OPERATOR_KEY"
 
 info "Starting containers..."
-ssh_do "cd /opt/onym-infra && docker compose up -d"
+# Force Authority recreation even when only the materialized manifest
+# changed. It reads the exact bytes once at boot; updating the bind
+# mount without restarting would leave the old manifest in memory.
+ssh_do "cd /opt/onym-infra && docker compose up -d --no-deps --force-recreate authority && docker compose up -d"
 
 # ─── Verify ───────────────────────────────────────────────────────────
 
@@ -323,6 +328,6 @@ echo "  Logs:       ssh -i $SSH_KEY_PATH root@$DROPLET_IP 'cd /opt/onym-infra &&
 # discover the dependency from a rejected mandate.
 if [ -z "${AUTHORITY_INTERFACE_KEY:-}" ]; then
     echo
-    warn "AUTHORITY_INTERFACE_KEY is unset. Read countersigningKey from"
+    warn "AUTHORITY_INTERFACE_KEY is unset. Read interfaceKey from"
     warn "  https://$MODERATION_HOST/health, set it in .env (or the repo variable), and re-run."
 fi

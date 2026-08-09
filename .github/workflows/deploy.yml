@@ -43,7 +43,7 @@ name: Deploy
 #                                    exist until the interface has booted once, so it
 #                                    is a variable rather than a secret: leave it
 #                                    empty on the first deploy, read
-#                                    `countersigningKey` from its `/health`, set it,
+#                                    `interfaceKey` from its `/health`, set it,
 #                                    and re-run
 #   DROPLET_ID          set this after the first run (printed in the job
 #                       summary) so subsequent runs reuse the same box

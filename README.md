@@ -112,7 +112,7 @@ deploy is a two-pass affair without an unsigned enforcement window:
 
    ```bash
    curl -fsS https://moderation.onym.app/health \
-     | python3 -c 'import json,sys; print(json.load(sys.stdin)["countersigningKey"])'
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["interfaceKey"])'
    ```
 
 Until pass two, the authority cannot validate a newly registered
@@ -163,7 +163,7 @@ Configure once under **Settings → Secrets and variables → Actions**:
 
 `AUTHORITY_INTERFACE_KEY` is a variable and not a secret because it is
 a *public* key, and because it does not exist until the interface has
-booted once. Read `countersigningKey` from the interface's `/health` —
+booted once. Read `interfaceKey` from the interface's `/health` —
 see the two-pass first deploy above.
 
 Re-runs are idempotent: `deploy.sh` reuses the existing droplet named
