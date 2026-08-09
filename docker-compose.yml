@@ -191,6 +191,9 @@ services:
       # evidence was disclosed for adjudication and shipping it to
       # someone else's API is a disclosure of its own.
       - AUTHORITY_TRIAGE_MODE=${AUTHORITY_TRIAGE_MODE:-off}
+      # QA only: allow the human panel to exercise a ban before the
+      # consented response window closes. Never enable on production.
+      - AUTHORITY_QA_ALLOW_EARLY_BAN=${AUTHORITY_QA_ALLOW_EARLY_BAN:-false}
       - AUTHORITY_TRIAGE_URL=${AUTHORITY_TRIAGE_URL:-http://moderation-model:8000/v1/chat/completions}
       - AUTHORITY_TRIAGE_PROFILE=${AUTHORITY_TRIAGE_PROFILE:-}
       - AUTHORITY_TRIAGE_SERVED_MODEL=${AUTHORITY_TRIAGE_SERVED_MODEL:-}

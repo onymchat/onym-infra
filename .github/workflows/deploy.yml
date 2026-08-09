@@ -117,6 +117,8 @@ jobs:
           MODERATION_ENFORCE_SIGNATURES=${{ vars.MODERATION_ENFORCE_SIGNATURES || 'true' }}
           MODERATION_INTERFACE_KEY_EPOCHS=${{ vars.MODERATION_INTERFACE_KEY_EPOCHS }}
           AUTHORITY_INTERFACE_KEY=${{ vars.AUTHORITY_INTERFACE_KEY }}
+          AUTHORITY_TRIAGE_MODE=off
+          AUTHORITY_QA_ALLOW_EARLY_BAN=true
           CADDY_EMAIL=${{ vars.CADDY_EMAIL || 'rinat@qda.one' }}
           DO_REGION=${{ vars.DO_REGION || 'ams3' }}
           DO_DROPLET_SIZE=${{ vars.DO_DROPLET_SIZE || 's-1vcpu-2gb' }}
