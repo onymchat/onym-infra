@@ -32,18 +32,18 @@ name: Deploy
 #   DO_REGION, DO_DROPLET_SIZE
 #   MODERATION_HOST, AUTHORITY_HOST
 #   MODERATION_DEVICECHECK_ENV       production | development
-#   MODERATION_ENFORCE_SIGNATURES    Must be false until the authority is
-#                                    actually signing, then true. While it is
-#                                    false, whatever holds the shared token can
-#                                    mark a device without a verifiable verdict
+#   MODERATION_ENFORCE_SIGNATURES    Defaults true. Set false only as an
+#                                    explicit, temporary diagnostic override;
+#                                    it lets the shared token mark devices
+#                                    without a verifiable verdict
 #   AUTHORITY_INTERFACE_KEY          The interface's PUBLIC countersigning key,
 #                                    onym:key:<hex>. It is derived from
 #                                    MODERATION_INTERFACE_SIGNING_SEED and does not
-#                                    exist until the interface has booted once and
-#                                    logged it ("interface countersigning key"), so
-#                                    it is a variable rather than a secret: leave it
-#                                    empty on the first deploy, read it out of
-#                                    `docker compose logs moderation`, set it, re-run
+#                                    exist until the interface has booted once, so it
+#                                    is a variable rather than a secret: leave it
+#                                    empty on the first deploy, read
+#                                    `countersigningKey` from its `/health`, set it,
+#                                    and re-run
 #   DROPLET_ID          set this after the first run (printed in the job
 #                       summary) so subsequent runs reuse the same box
 
@@ -109,7 +109,7 @@ jobs:
           MODERATION_HOST=${{ vars.MODERATION_HOST || 'moderation.onym.app' }}
           AUTHORITY_HOST=${{ vars.AUTHORITY_HOST || 'authority.onym.app' }}
           MODERATION_DEVICECHECK_ENV=${{ vars.MODERATION_DEVICECHECK_ENV || 'production' }}
-          MODERATION_ENFORCE_SIGNATURES=${{ vars.MODERATION_ENFORCE_SIGNATURES || 'false' }}
+          MODERATION_ENFORCE_SIGNATURES=${{ vars.MODERATION_ENFORCE_SIGNATURES || 'true' }}
           AUTHORITY_INTERFACE_KEY=${{ vars.AUTHORITY_INTERFACE_KEY }}
           CADDY_EMAIL=${{ vars.CADDY_EMAIL || 'rinat@qda.one' }}
           DO_REGION=${{ vars.DO_REGION || 'ams3' }}

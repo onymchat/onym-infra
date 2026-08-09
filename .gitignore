@@ -4,6 +4,10 @@ relayer.env
 moderation.env
 authority.env
 
+# Deployment-generated public artifacts. The authority manifest is
+# materialized from the reference template plus the deployment key.
+runtime/
+
 # The Apple DeviceCheck signing key, wherever it lands.
 *.p8
 

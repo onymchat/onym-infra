@@ -56,11 +56,15 @@ cp authority.env.example authority.env      # AUTHORITY_SIGNING_SEED (required),
 ./deploy/digitalocean/deploy.sh
 ```
 
-The authority's published manifest and the policy documents its terms
-link to ship in the `moderation` submodule, so there is nothing to
-copy into place — but the submodule does have to be checked out
-(`git submodule update --init --recursive` if you cloned without
-`--recurse-submodules`). `deploy.sh` warns if either is missing.
+The authority's reference manifest and the policy documents its terms
+link to ship in the `moderation` submodule, so the submodule has to be
+checked out (`git submodule update --init --recursive` if you cloned
+without `--recurse-submodules`). At deploy time the script derives the
+authority's public operator key from `AUTHORITY_SIGNING_SEED` inside the
+built container and materializes the deployment manifest. It also
+rewrites the reference policy origin to `AUTHORITY_HOST`, so staging
+does not send users to production. The seed itself never leaves the
+secret env file or container.
 
 The script creates (or reuses) an `s-1vcpu-2gb` droplet, adds a 2 GB
 swapfile so the Rust builds don't OOM, creates **DNS-only** (grey-cloud)
@@ -86,52 +90,43 @@ the box.
   re-run `deploy.sh` (rebuilds the image).
 - **Moderation code:** same shape — `git -C moderation pull`, commit,
   re-run `deploy.sh`.
-- **The authority manifest and policy documents:** both live in the
-  submodule, so they change by bumping it. Note that editing
-  `manifest.json` after anyone has consented silently invalidates their
-  mandates, because a mandate pins the SHA-256 of those exact bytes —
-  changing the terms means publishing a *new* manifest and taking fresh
-  mandates against it.
+- **The authority manifest and policy documents:** the reference
+  template and policy documents change by bumping the submodule. The
+  deployed manifest is materialized from that template with the
+  deployment's operator key and `AUTHORITY_HOST`. Changing any of those
+  bytes after consent creates a new manifest hash, so existing mandates
+  remain bound to the old terms and fresh consent is required.
 
 ## Bringing the moderation services up for the first time
 
-Three things only settle after a boot, so the first deploy is a
-two-pass affair:
+Only the interface countersigning key settles after a boot, so the first
+deploy is a two-pass affair without an unsigned enforcement window:
 
-1. Deploy with `MODERATION_ENFORCE_SIGNATURES=false` and
-   `AUTHORITY_INTERFACE_KEY=` empty. Until signatures are enforced,
-   whatever holds the shared authority token can ban a device, so
-   treat this as a window to get through rather than a state to sit in.
-2. Read the interface's public countersigning key out of the logs
-   (`docker compose logs moderation`, the `interface countersigning
-   key` line), set it as `AUTHORITY_INTERFACE_KEY`, set
-   `MODERATION_ENFORCE_SIGNATURES=true`, and re-run.
-3. The manifest's `operator` field must name the public half of
-   `AUTHORITY_SIGNING_SEED`, and the authority **refuses to start**
-   when they disagree — an authority whose verdicts nobody can verify
-   is worse than one that is plainly down. It ships with a placeholder
-   of all zeros, so derive the key and put it in the manifest
-   *upstream*, then bump the submodule. It is not something to set in
-   this repo.
+1. Generate both signing seeds, leave `AUTHORITY_INTERFACE_KEY=` empty,
+   keep `MODERATION_ENFORCE_SIGNATURES=true`, and deploy. The script
+   derives the authority operator key before startup and materializes a
+   matching manifest, so the authority boots and every accepted verdict
+   is signed from the first request.
+2. Read the interface's public key from its health response, set it as
+   `AUTHORITY_INTERFACE_KEY`, and re-run:
 
    ```bash
-   openssl rand -hex 32   # the seed itself → AUTHORITY_SIGNING_SEED secret
-   AUTHORITY_SIGNING_SEED=<seed> onym-moderation-authority derive-operator-key
-   # → onym:key:…  goes in manifest.json's `operator` field
+   curl -fsS https://moderation.onym.app/health \
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["countersigningKey"])'
    ```
 
-   The subcommand runs before any manifest or store is read, precisely
-   because neither is configured yet — you do not have to start the
-   service, watch it exit, and read the key out of a log line.
+Until pass two, the authority cannot validate a newly registered
+mandate's interface countersignature and refuses it. That is a closed
+bootstrap state, not permission to accept unsigned verdicts.
 
 ## The published policy documents
 
-The manifest's terms link to `https://authority.onym.app/policy/…` —
-nine documents a user reads *before* consenting, one per term and one
-per violation class. A 404 there means the term was never published,
-so Caddy serves them from `moderation/authority/published/` rather
-than leaving them to the application, which routes only
-`/manifest.json` and `/v1/*`.
+The materialized manifest's terms link to
+`https://$AUTHORITY_HOST/policy/…` — nine documents a user reads
+*before* consenting, one per term and one per violation class. A 404
+there means the term was never published, so Caddy serves them from
+`moderation/authority/published/` rather than leaving them to the
+application, which routes only `/manifest.json` and `/v1/*`.
 
 There are no `#fragment` links: each class is its own document, so a
 `definition` URL resolves to exactly the text it names. The documents
@@ -168,7 +163,8 @@ Configure once under **Settings → Secrets and variables → Actions**:
 
 `AUTHORITY_INTERFACE_KEY` is a variable and not a secret because it is
 a *public* key, and because it does not exist until the interface has
-booted once — see the two-pass first deploy above.
+booted once. Read `countersigningKey` from the interface's `/health` —
+see the two-pass first deploy above.
 
 Re-runs are idempotent: `deploy.sh` reuses the existing droplet named
 `onym-infra` (adopting it by name), so repeat CI runs **update** the box

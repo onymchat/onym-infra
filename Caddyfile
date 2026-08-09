@@ -37,15 +37,17 @@
 # service caps bodies at 256 KiB itself, which is the limit that should
 # win.
 {$MODERATION_HOST} {
+	encode zstd gzip
 	reverse_proxy moderation:8080
 }
 
-# Moderation authority. Same shape, and note that `/manifest.json` is
-# deliberately public: people have to be able to read the classes,
-# terms and appeal path *before* consenting, and anyone should be able
-# to check a mandate's pinned hash against what this authority
-# publishes.
+# Moderation authority. It caps request bodies at 1 MiB itself (the
+# interface above uses 256 KiB). `/manifest.json` is deliberately
+# public: people have to be able to read the classes, terms and appeal
+# path *before* consenting, and anyone should be able to check a
+# mandate's pinned hash against what this authority publishes.
 {$AUTHORITY_HOST} {
+	encode zstd gzip
 	# The manifest links out to the nine documents its terms are
 	# written in — /policy/csam, /policy/evidence-rules, and seven
 	# more. Those are what a user reads *before* consenting, so a 404

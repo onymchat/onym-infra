@@ -109,10 +109,9 @@ services:
       - MODERATION_DEVICECHECK_ENV=${MODERATION_DEVICECHECK_ENV:-production}
       - MODERATION_INTERFACE_COMPONENT_ID=${MODERATION_INTERFACE_COMPONENT_ID:-onym:component:onym-ios}
       # Whether a verdict must carry a signature that verifies against
-      # the authority's published key. Off is only correct until the
-      # authority is actually signing; with it off, anything that can
-      # reach POST /v1/verdicts with the shared token can mark a device.
-      - MODERATION_ENFORCE_SIGNATURES=${MODERATION_ENFORCE_SIGNATURES:-false}
+      # the authority's published key. There is no fail-open default:
+      # deploy.sh materializes the matching manifest before startup.
+      - MODERATION_ENFORCE_SIGNATURES=${MODERATION_ENFORCE_SIGNATURES:?set MODERATION_ENFORCE_SIGNATURES in .env (normally true)}
       # Left false on purpose: without it, an unset MODERATION_AUTHORITY_TOKEN
       # fails closed rather than leaving the verdict endpoint open.
       - MODERATION_ALLOW_UNAUTHENTICATED_AUTHORITY=${MODERATION_ALLOW_UNAUTHENTICATED_AUTHORITY:-false}
@@ -189,13 +188,10 @@ services:
       # Losing this loses the record behind every mark the interface is
       # holding — and an accused person's evidence that a case existed.
       - authority-data:/data
-      # The published manifest, which ships in the submodule and is
-      # served byte-for-byte because users' mandates pin the SHA-256 of
-      # these exact bytes. Editing this file after anyone has consented
-      # silently invalidates their mandates, so it is read-only here
-      # and should be changed only by publishing a new manifest
-      # upstream and bumping the submodule.
-      - ./moderation/authority/manifest:/manifest:ro
+      # deploy.sh materializes the reference manifest with this
+      # deployment's operator key and public hostname before startup.
+      # It is served byte-for-byte because mandates pin these bytes.
+      - ./runtime/authority-manifest:/manifest:ro
     networks: [internal]
 
 volumes:

@@ -47,17 +47,13 @@ grep -qE '^MODERATION_INTERFACE_SIGNING_SEED=[0-9a-fA-F]{64}$' "$MODERATION_ENV"
 grep -qE '^AUTHORITY_SIGNING_SEED=[0-9a-fA-F]{64}$' "$AUTHORITY_ENV" \
     || { err "authority.env: AUTHORITY_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
 
-# The manifest and the policy documents ship in the submodule, so if
-# they are missing the submodule was never checked out — `git submodule
-# update --init --recursive`. It is worth catching, because the failure
-# is quiet in two different ways: the authority exits at boot without
-# its manifest, and Caddy just 404s every /policy/ URL, which turns the
-# terms a user has to read before consenting into a dead link. Neither
-# is worth refusing to deploy the other five services over, so warn.
+# The reference manifest and policy documents ship in the submodule.
+# Deployment cannot safely continue without them: the authority would
+# fail to boot or publish terms nobody can read.
 [ -f "$REPO_ROOT/moderation/authority/manifest/manifest.json" ] \
-    || warn "moderation/authority/manifest/manifest.json is missing (submodule not checked out?) — the authority will not start."
+    || { err "moderation/authority/manifest/manifest.json is missing (submodule not checked out?)."; exit 1; }
 [ -d "$REPO_ROOT/moderation/authority/published" ] \
-    || warn "moderation/authority/published/ is missing (submodule not checked out?) — the manifest's /policy/ URLs will 404."
+    || { err "moderation/authority/published/ is missing (submodule not checked out?)."; exit 1; }
 
 : "${DO_API_KEY:?set DO_API_KEY in .env}"
 : "${CF_API_TOKEN:?set CF_API_TOKEN in .env}"
@@ -67,7 +63,10 @@ grep -qE '^AUTHORITY_SIGNING_SEED=[0-9a-fA-F]{64}$' "$AUTHORITY_ENV" \
 : "${RELAYER_HOST:?set RELAYER_HOST in .env}"
 : "${MODERATION_HOST:?set MODERATION_HOST in .env}"
 : "${AUTHORITY_HOST:?set AUTHORITY_HOST in .env}"
+: "${MODERATION_ENFORCE_SIGNATURES:?set MODERATION_ENFORCE_SIGNATURES in .env (normally true)}"
 : "${CADDY_EMAIL:?set CADDY_EMAIL in .env}"
+[[ "$AUTHORITY_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
+    || { err "AUTHORITY_HOST must be a hostname without a scheme or path."; exit 1; }
 DO_REGION="${DO_REGION:-ams3}"
 DO_DROPLET_SIZE="${DO_DROPLET_SIZE:-s-1vcpu-2gb}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
@@ -236,7 +235,7 @@ RELAYER_HOST=$RELAYER_HOST
 MODERATION_HOST=$MODERATION_HOST
 AUTHORITY_HOST=$AUTHORITY_HOST
 MODERATION_DEVICECHECK_ENV=${MODERATION_DEVICECHECK_ENV:-production}
-MODERATION_ENFORCE_SIGNATURES=${MODERATION_ENFORCE_SIGNATURES:-false}
+MODERATION_ENFORCE_SIGNATURES=$MODERATION_ENFORCE_SIGNATURES
 AUTHORITY_INTERFACE_KEY=${AUTHORITY_INTERFACE_KEY:-}
 CADDY_EMAIL=$CADDY_EMAIL
 EOF
@@ -244,8 +243,26 @@ scp "${SSH_OPTS[@]}" "$RELAYER_ENV" "root@$DROPLET_IP:/opt/onym-infra/relayer.en
 scp "${SSH_OPTS[@]}" "$MODERATION_ENV" "root@$DROPLET_IP:/opt/onym-infra/moderation.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$AUTHORITY_ENV" "root@$DROPLET_IP:/opt/onym-infra/authority.env" >/dev/null
 
-info "Building + starting containers (three Rust builds; the first run takes a while)..."
-ssh_do "cd /opt/onym-infra && docker compose build && docker compose up -d"
+info "Building containers serially (three Rust builds; the first run takes a while)..."
+ssh_do "cd /opt/onym-infra && mkdir -p runtime/authority-manifest && COMPOSE_PARALLEL_LIMIT=1 docker compose build"
+
+# The upstream manifest is a reference template: its all-zero operator
+# cannot verify a verdict and the authority correctly refuses to boot
+# against it. Derive the public half from the deployment secret inside
+# the built image, then materialize the exact manifest this authority
+# will publish. The seed never leaves authority.env or the container.
+info "Materializing authority manifest for $AUTHORITY_HOST..."
+OPERATOR_KEY="$(ssh_do "cd /opt/onym-infra && docker compose run --rm --no-deps authority derive-operator-key")"
+[[ "$OPERATOR_KEY" =~ ^onym:key:[0-9a-f]{64}$ ]] \
+    || { err "authority returned an invalid operator key: $OPERATOR_KEY"; exit 1; }
+ssh_do "python3 /opt/onym-infra/deploy/digitalocean/materialize-authority-manifest.py \
+    /opt/onym-infra/moderation/authority/manifest/manifest.json \
+    /opt/onym-infra/runtime/authority-manifest/manifest.json \
+    $OPERATOR_KEY $AUTHORITY_HOST"
+ok "Authority manifest names $OPERATOR_KEY"
+
+info "Starting containers..."
+ssh_do "cd /opt/onym-infra && docker compose up -d"
 
 # ─── Verify ───────────────────────────────────────────────────────────
 
@@ -253,7 +270,8 @@ info "Verifying (certs may take ~30s on first issue)..."
 sleep 20
 check() {
     local url="$1" label="$2" code
-    code="$(curl -o /dev/null -s -w '%{http_code}' --max-time 15 "$url" 2>/dev/null || echo 000)"
+    code="$(curl -o /dev/null -s -w '%{http_code}' --max-time 15 "$url" 2>/dev/null || true)"
+    [ -n "$code" ] || code=000
     if [ "$code" != "000" ]; then ok "  $label — HTTP $code (TLS OK)"; else warn "  $label — no response yet (cert may still be issuing)"; fi
 }
 # The moderation endpoints have a right answer, so "anything but 000"
@@ -262,13 +280,15 @@ check() {
 # unreachable. Both are exactly the failures worth catching.
 check_health() {
     local url="$1" label="$2" hint="${3:-}" code
-    code="$(curl -o /dev/null -s -w '%{http_code}' --max-time 15 "$url" 2>/dev/null || echo 000)"
+    code="$(curl -o /dev/null -s -w '%{http_code}' --max-time 15 "$url" 2>/dev/null || true)"
+    [ -n "$code" ] || code=000
     case "$code" in
         200) ok "  $label — HTTP 200" ;;
         000) warn "  $label — no response yet (cert may still be issuing)" ;;
-        *)   warn "  $label — HTTP $code, expected 200.${hint:+ $hint}" ;;
+        *)   err "  $label — HTTP $code, expected 200.${hint:+ $hint}"; HEALTH_FAILURES=1 ;;
     esac
 }
+HEALTH_FAILURES=0
 check "https://$RELAYER_HOST/" "relayer"   # expect 401/422 (auth/validation) = up
 check "https://$BLOSSOM_HOST/" "blossom"
 check "https://$NOSTR_HOST/"   "nostr"     # expect 400/426 on plain GET = up
@@ -279,6 +299,9 @@ check_health "https://$AUTHORITY_HOST/health"  "authority"  "Check: docker compo
 # is one of the nine the manifest links to, and the heaviest.
 check_health "https://$AUTHORITY_HOST/policy/csam" "policy documents" \
     "The manifest links here; a 404 means the submodule is not checked out on the droplet."
+
+[ "$HEALTH_FAILURES" -eq 0 ] \
+    || { err "One or more moderation endpoints returned a definite non-200 response."; exit 1; }
 
 echo
 ok "Done. Droplet $DROPLET_ID @ $DROPLET_IP"
@@ -294,6 +317,6 @@ echo "  Logs:       ssh -i $SSH_KEY_PATH root@$DROPLET_IP 'cd /opt/onym-infra &&
 # discover the dependency from a rejected mandate.
 if [ -z "${AUTHORITY_INTERFACE_KEY:-}" ]; then
     echo
-    warn "AUTHORITY_INTERFACE_KEY is unset. Read the 'interface countersigning key' line from"
-    warn "  docker compose logs moderation, set it in .env (or the repo variable), and re-run."
+    warn "AUTHORITY_INTERFACE_KEY is unset. Read countersigningKey from"
+    warn "  https://$MODERATION_HOST/health, set it in .env (or the repo variable), and re-run."
 fi
