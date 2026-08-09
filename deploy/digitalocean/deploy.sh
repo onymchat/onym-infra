@@ -270,6 +270,30 @@ ssh_do "python3 /opt/onym-infra/deploy/digitalocean/materialize-authority-manife
     $OPERATOR_KEY $AUTHORITY_HOST"
 ok "Authority manifest names $OPERATOR_KEY"
 
+# Sign the exact materialized bytes and publish the detached signature
+# next to them. Clients verify `<manifest-url>.sig` against the
+# directory-pinned operator key before trusting the manifest's terms
+# (onym-infra#4); without this asset they can only accept it
+# soft-verified. Signing runs inside the authority image so the seed
+# stays in authority.env, same as derive-operator-key — and it happens
+# on every deploy, so a re-materialized manifest can never outlive its
+# signature.
+info "Signing authority manifest..."
+if ! MANIFEST_SIG="$(ssh_do "cd /opt/onym-infra && docker compose run --rm --no-deps \
+    authority onym-moderation-authority sign-manifest /manifest/manifest.json")"; then
+    err "authority could not sign the manifest; is the image built from a"
+    err "moderation submodule that has the sign-manifest subcommand?"
+    exit 1
+fi
+[[ "$MANIFEST_SIG" =~ ^[A-Za-z0-9+/]{86}==$ ]] \
+    || { err "authority returned an invalid manifest signature: $MANIFEST_SIG"; exit 1; }
+# Write-then-rename, same discipline as the manifest itself: never
+# expose a partly-written signature during a re-deploy.
+ssh_do "printf '%s\n' '$MANIFEST_SIG' > /opt/onym-infra/runtime/authority-manifest/manifest.json.sig.tmp \
+    && mv /opt/onym-infra/runtime/authority-manifest/manifest.json.sig.tmp \
+          /opt/onym-infra/runtime/authority-manifest/manifest.json.sig"
+ok "Authority manifest signature published"
+
 info "Starting containers..."
 # Force Authority recreation even when only the materialized manifest
 # changed. It reads the exact bytes once at boot; updating the bind
@@ -311,6 +335,10 @@ check_health "https://$AUTHORITY_HOST/health"  "authority"  "Check: docker compo
 # is one of the nine the manifest links to, and the heaviest.
 check_health "https://$AUTHORITY_HOST/policy/csam" "policy documents" \
     "The manifest links here; a 404 means the submodule is not checked out on the droplet."
+# Clients verify the manifest against this before trusting its terms;
+# a 404 here forces every client back to soft-verified acceptance.
+check_health "https://$AUTHORITY_HOST/manifest.json.sig" "manifest signature" \
+    "Check that deploy signed the manifest and Caddy mounts runtime/authority-manifest."
 
 [ "$HEALTH_FAILURES" -eq 0 ] \
     || { err "One or more moderation endpoints returned a definite non-200 response."; exit 1; }
