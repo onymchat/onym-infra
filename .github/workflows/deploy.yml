@@ -23,8 +23,9 @@ name: Deploy
 #   MODERATION_AUTHORITY_TOKEN       Shared bearer token for POST /v1/verdicts.
 #                                    The SAME value is the authority's
 #                                    AUTHORITY_INTERFACE_TOKEN — one secret, two files
-#   AUTHORITY_MODERATOR_TOKEN        Bearer token for deciding a case
-#   AUTHORITY_ADMIN_TOKEN            Bearer token for the moderator panel at /admin
+#   AUTHORITY_MODERATOR_TOKEN        (optional) bearer token for the JSON decision API
+#   AUTHORITY_ADMIN_TOKEN            Required while triage is off: bearer token for the
+#                                    human decision and appeal panel at /admin
 #   MODERATION_AUDIT_TOKEN           (optional) bearer token for GET /v1/write-log
 #
 # Repository VARIABLES (optional — defaults shown in the workflow):

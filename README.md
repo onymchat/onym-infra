@@ -51,7 +51,7 @@ cd onym-infra
 cp .env.example .env                        # DO_API_KEY, CF_API_TOKEN, hosts, size...
 cp relayer.env.example relayer.env          # RELAYER_SECRET_KEY (required), RELAYER_AUTH_TOKENS...
 cp moderation.env.example moderation.env    # DeviceCheck key + ids, interface signing seed...
-cp authority.env.example authority.env      # AUTHORITY_SIGNING_SEED (required), tokens...
+cp authority.env.example authority.env      # signing seed + admin token (required), API token...
 
 ./deploy/digitalocean/deploy.sh
 ```
@@ -153,8 +153,8 @@ Configure once under **Settings → Secrets and variables → Actions**:
   `MODERATION_DEVICECHECK_TEAM_ID`, `MODERATION_INTERFACE_SIGNING_SEED`,
   `AUTHORITY_SIGNING_SEED`, `MODERATION_AUTHORITY_TOKEN` (the same value
   serves as the authority's `AUTHORITY_INTERFACE_TOKEN`),
-  `AUTHORITY_MODERATOR_TOKEN`, `AUTHORITY_ADMIN_TOKEN`, and optionally
-  `MODERATION_AUDIT_TOKEN`.
+  `AUTHORITY_ADMIN_TOKEN`, and optionally `AUTHORITY_MODERATOR_TOKEN`
+  and `MODERATION_AUDIT_TOKEN`.
 - **Variables** (all optional; defaults in the workflow):
   `DOMAIN`, `NOSTR_HOST`, `BLOSSOM_HOST`, `RELAYER_HOST`,
   `MODERATION_HOST`, `AUTHORITY_HOST`, `MODERATION_DEVICECHECK_ENV`,
@@ -190,6 +190,13 @@ docker compose logs -f authority
 
 Both moderation services answer `GET /health`, which `deploy.sh` checks
 for a 200 at the end of a run.
+
+The human moderation queue is at `https://$AUTHORITY_HOST/admin`, protected by
+`AUTHORITY_ADMIN_TOKEN`. With autonomous triage off in this stack, its
+deadline-ordered first queue is every open case awaiting a decision;
+the second is appeals and new-holder claims. The Authority refuses to
+start without this human route, and deploy catches an empty token
+before building or touching the droplet.
 
 ## Migration notes (from stellar-mls)
 

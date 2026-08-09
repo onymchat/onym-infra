@@ -46,6 +46,12 @@ grep -qE '^MODERATION_INTERFACE_SIGNING_SEED=[0-9a-fA-F]{64}$' "$MODERATION_ENV"
 [ -f "$AUTHORITY_ENV" ] || { err "Missing $AUTHORITY_ENV — copy authority.env.example and fill it in."; exit 1; }
 grep -qE '^AUTHORITY_SIGNING_SEED=[0-9a-fA-F]{64}$' "$AUTHORITY_ENV" \
     || { err "authority.env: AUTHORITY_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
+# Autonomous triage is off in this stack. Current onym-moderation main
+# refuses to boot with no decider, and the admin panel is also the only
+# implemented human appeal route, so an empty token is a deployment
+# error rather than a service health surprise.
+grep -qE '^AUTHORITY_ADMIN_TOKEN=.+$' "$AUTHORITY_ENV" \
+    || { err "authority.env: AUTHORITY_ADMIN_TOKEN is required while autonomous triage is off."; exit 1; }
 
 # The reference manifest and policy documents ship in the submodule.
 # Deployment cannot safely continue without them: the authority would
