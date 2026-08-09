@@ -96,7 +96,7 @@ save_env() {
     mv "$tmp" "$ENV_FILE"
 }
 
-for c in doctl ssh rsync curl python3 dig; do
+for c in doctl ssh rsync curl python3 dig shasum; do
     command -v "$c" >/dev/null || { err "missing required command: $c"; exit 1; }
 done
 [ -f "$SSH_KEY_PATH" ] || { err "SSH key not found at $SSH_KEY_PATH"; exit 1; }
@@ -361,21 +361,30 @@ check_health "https://$AUTHORITY_HOST/manifest.json.sig" "manifest signature" \
 # minted, over manifest bytes identical to the file it signed. (No
 # local crypto needed: sig == minted sig AND served bytes == signed
 # bytes ⇒ the signature verifies.) Every remote/network command below
-# is `|| true`-guarded: under `set -e` a transient failure here would
+# is failure-guarded: under `set -e` a transient failure here would
 # otherwise abort a deploy that already succeeded, with no message.
 SERVED_SIG="$(curl -fsS --max-time 15 "https://$AUTHORITY_HOST/manifest.json.sig" 2>/dev/null | tr -d '[:space:]' || true)"
-SERVED_MANIFEST="$(curl -fsS --max-time 15 "https://$AUTHORITY_HOST/manifest.json" 2>/dev/null || true)"
-if [ -n "$SERVED_SIG" ] && [ -n "$SERVED_MANIFEST" ]; then
+# Hash curl's raw output inside the pipeline. Capturing the body in a
+# shell variable strips its trailing LF, changing the bytes the hash
+# covers. The assignment lives in an `if` so `set -e` does not abort;
+# `pipefail` makes a failed curl take the else branch instead of
+# reporting the hash of empty stdin.
+SERVED_MANIFEST_HASH=""
+if HASHED_MANIFEST="$(
+    curl -fsS --max-time 15 "https://$AUTHORITY_HOST/manifest.json" 2>/dev/null \
+        | shasum -a 256 \
+        | cut -d' ' -f1
+)"; then
+    SERVED_MANIFEST_HASH="$HASHED_MANIFEST"
+fi
+if [ -n "$SERVED_SIG" ] && [ -n "$SERVED_MANIFEST_HASH" ]; then
     PAIR_OK=1
     if [ "$SERVED_SIG" != "$MANIFEST_SIG" ]; then
         err "  served manifest.json.sig differs from the signature this deploy produced."
         HEALTH_FAILURES=1; PAIR_OK=0
     fi
-    # Hash the captured body (hashing a failed curl's empty stdin
-    # yields the well-known empty hash and a misleading mismatch).
     # `shasum` locally (macOS has no sha256sum); `sha256sum` remotely
     # (coreutils is guaranteed on the droplet; perl's shasum is not).
-    SERVED_MANIFEST_HASH="$(printf '%s' "$SERVED_MANIFEST" | shasum -a 256 | cut -d' ' -f1)"
     SIGNED_MANIFEST_HASH="$(ssh_do "sha256sum /opt/onym-infra/runtime/authority-manifest/manifest.json | cut -d' ' -f1" || true)"
     if [ -z "$SIGNED_MANIFEST_HASH" ]; then
         warn "  could not hash the signed manifest on the droplet; served-pair check incomplete."
