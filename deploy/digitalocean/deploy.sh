@@ -264,32 +264,44 @@ if ! OPERATOR_KEY="$(ssh_do "cd /opt/onym-infra && docker compose run --rm --no-
 fi
 [[ "$OPERATOR_KEY" =~ ^onym:key:[0-9a-f]{64}$ ]] \
     || { err "authority returned an invalid operator key: $OPERATOR_KEY"; exit 1; }
+
+# The manifest and its signature move as a PAIR, and the failure mode
+# between the two must always be "signature missing", never "signature
+# covers different bytes": a stale .sig next to new manifest bytes
+# looks healthy (the running authority serves its in-memory copy) and
+# detonates on the next container restart, when every hard-verifying
+# client rejects the manifest at once. So: retire the old signature
+# first, materialize to a staging name, sign the staged bytes, and
+# only then move manifest and signature into place.
+ssh_do "rm -f /opt/onym-infra/runtime/authority-manifest/manifest.json.sig"
 ssh_do "python3 /opt/onym-infra/deploy/digitalocean/materialize-authority-manifest.py \
     /opt/onym-infra/moderation/authority/manifest/manifest.json \
-    /opt/onym-infra/runtime/authority-manifest/manifest.json \
+    /opt/onym-infra/runtime/authority-manifest/manifest.json.next \
     $OPERATOR_KEY $AUTHORITY_HOST"
 ok "Authority manifest names $OPERATOR_KEY"
 
-# Sign the exact materialized bytes and publish the detached signature
-# next to them. Clients verify `<manifest-url>.sig` against the
-# directory-pinned operator key before trusting the manifest's terms
-# (onym-infra#4); without this asset they can only accept it
-# soft-verified. Signing runs inside the authority image so the seed
-# stays in authority.env, same as derive-operator-key — and it happens
-# on every deploy, so a re-materialized manifest can never outlive its
-# signature.
+# Sign the exact staged bytes inside the authority image, so the seed
+# stays in authority.env — same posture as derive-operator-key
+# (onym-infra#4). The published body is base64 + a trailing LF; the
+# iOS verifier trims whitespace before decoding
+# (SignedAsset.decodeSignature), and that contract is pinned in the
+# README.
 info "Signing authority manifest..."
 if ! MANIFEST_SIG="$(ssh_do "cd /opt/onym-infra && docker compose run --rm --no-deps \
-    authority onym-moderation-authority sign-manifest /manifest/manifest.json")"; then
+    authority onym-moderation-authority sign-manifest /manifest/manifest.json.next")"; then
     err "authority could not sign the manifest; is the image built from a"
     err "moderation submodule that has the sign-manifest subcommand?"
+    err "(The old signature was already retired: clients soft-verify"
+    err "until a deploy completes — no stale pair was left behind.)"
     exit 1
 fi
 [[ "$MANIFEST_SIG" =~ ^[A-Za-z0-9+/]{86}==$ ]] \
     || { err "authority returned an invalid manifest signature: $MANIFEST_SIG"; exit 1; }
-# Write-then-rename, same discipline as the manifest itself: never
-# expose a partly-written signature during a re-deploy.
-ssh_do "printf '%s\n' '$MANIFEST_SIG' > /opt/onym-infra/runtime/authority-manifest/manifest.json.sig.tmp \
+# Manifest first, then its signature: at every instant the published
+# signature either matches the published manifest or is absent.
+ssh_do "mv /opt/onym-infra/runtime/authority-manifest/manifest.json.next \
+          /opt/onym-infra/runtime/authority-manifest/manifest.json \
+    && printf '%s\n' '$MANIFEST_SIG' > /opt/onym-infra/runtime/authority-manifest/manifest.json.sig.tmp \
     && mv /opt/onym-infra/runtime/authority-manifest/manifest.json.sig.tmp \
           /opt/onym-infra/runtime/authority-manifest/manifest.json.sig"
 ok "Authority manifest signature published"
@@ -335,10 +347,33 @@ check_health "https://$AUTHORITY_HOST/health"  "authority"  "Check: docker compo
 # is one of the nine the manifest links to, and the heaviest.
 check_health "https://$AUTHORITY_HOST/policy/csam" "policy documents" \
     "The manifest links here; a 404 means the submodule is not checked out on the droplet."
+# The endpoint the whole trust chain hangs on, checked like a service.
+check_health "https://$AUTHORITY_HOST/manifest.json" "manifest" \
+    "Check: docker compose logs authority"
 # Clients verify the manifest against this before trusting its terms;
 # a 404 here forces every client back to soft-verified acceptance.
 check_health "https://$AUTHORITY_HOST/manifest.json.sig" "manifest signature" \
     "Check that deploy signed the manifest and Caddy mounts runtime/authority-manifest."
+# Publication is not correctness: prove the SERVED pair is the pair
+# this deploy produced — the served signature must be the one just
+# minted, over manifest bytes identical to the file it signed. (No
+# local crypto needed: sig == minted sig AND served bytes == signed
+# bytes ⇒ the signature verifies.)
+SERVED_SIG="$(curl -fsS --max-time 15 "https://$AUTHORITY_HOST/manifest.json.sig" 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -n "$SERVED_SIG" ]; then
+    if [ "$SERVED_SIG" != "$MANIFEST_SIG" ]; then
+        err "  served manifest.json.sig differs from the signature this deploy produced."
+        HEALTH_FAILURES=1
+    fi
+    SERVED_MANIFEST_HASH="$(curl -fsS --max-time 15 "https://$AUTHORITY_HOST/manifest.json" 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)"
+    SIGNED_MANIFEST_HASH="$(ssh_do "shasum -a 256 /opt/onym-infra/runtime/authority-manifest/manifest.json | cut -d' ' -f1")"
+    if [ -n "$SERVED_MANIFEST_HASH" ] && [ "$SERVED_MANIFEST_HASH" != "$SIGNED_MANIFEST_HASH" ]; then
+        err "  served manifest.json differs from the bytes the signature covers"
+        err "  (the authority is still serving its previous in-memory manifest?)."
+        HEALTH_FAILURES=1
+    fi
+    [ "$HEALTH_FAILURES" -eq 0 ] && ok "  manifest signature covers the served bytes"
+fi
 
 [ "$HEALTH_FAILURES" -eq 0 ] \
     || { err "One or more moderation endpoints returned a definite non-200 response."; exit 1; }
