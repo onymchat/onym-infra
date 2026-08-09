@@ -108,6 +108,12 @@ services:
       - MODERATION_STORE_PATH=/data/moderation.sqlite
       - MODERATION_DEVICECHECK_ENV=${MODERATION_DEVICECHECK_ENV:-production}
       - MODERATION_INTERFACE_COMPONENT_ID=${MODERATION_INTERFACE_COMPONENT_ID:-onym:component:onym-ios}
+      # Which countersigning key each authority expects, as
+      # <componentId>=<epoch> pairs. Empty means every authority is on
+      # epoch 0 — the root seed used directly — which is the state
+      # before anyone was rotated and needs no entry. Not a secret: the
+      # epochs say which key is in force, not what it is.
+      - MODERATION_INTERFACE_KEY_EPOCHS=${MODERATION_INTERFACE_KEY_EPOCHS:-}
       # Whether a verdict must carry a signature that verifies against
       # the authority's published key. There is no fail-open default:
       # deploy.sh materializes the matching manifest before startup.

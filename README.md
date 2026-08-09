@@ -159,12 +159,63 @@ Configure once under **Settings → Secrets and variables → Actions**:
   `DOMAIN`, `NOSTR_HOST`, `BLOSSOM_HOST`, `RELAYER_HOST`,
   `MODERATION_HOST`, `AUTHORITY_HOST`, `MODERATION_DEVICECHECK_ENV`,
   `MODERATION_ENFORCE_SIGNATURES`, `AUTHORITY_INTERFACE_KEY`,
-  `CADDY_EMAIL`, `DO_REGION`, `DO_DROPLET_SIZE`, and `DROPLET_ID`.
+  `MODERATION_INTERFACE_KEY_EPOCHS`, `CADDY_EMAIL`, `DO_REGION`,
+  `DO_DROPLET_SIZE`, and `DROPLET_ID`.
 
 `AUTHORITY_INTERFACE_KEY` is a variable and not a secret because it is
 a *public* key, and because it does not exist until the interface has
 booted once. Read `interfaceKey` from the interface's `/health` —
 see the two-pass first deploy above.
+
+## Rotating an authority's countersigning key
+
+The interface derives a **separate** countersigning key per authority,
+from `MODERATION_INTERFACE_SIGNING_SEED` plus a per-authority epoch in
+`MODERATION_INTERFACE_KEY_EPOCHS`. Empty means everyone is on epoch 0,
+which is the seed used directly — the un-rotated state, and the one
+this deployment is in.
+
+Bumping one authority's epoch rotates only that relationship. Every
+other authority's mandates are untouched, which is the whole reason the
+keys are per-authority: rotating a single shared key would invalidate
+every countersignature ever issued, to everyone, at once.
+
+**This is about rotation, not containment.** All the derived keys live
+in the same process as the root, so this does not reduce what a
+compromise of the interface host costs. What it buys is the ability to
+burn one relationship — a key you no longer trust, or an authority you
+are de-listing.
+
+Both sides live in this stack, so the sequence is visible in one place.
+`AUTHORITY_INTERFACE_KEY` accepts a **comma-separated list**, and that
+is what makes the rotation gapless — the authority verifies against any
+listed key while the cutover happens:
+
+1. Derive the next key without deploying it. Bump the epoch in a
+   scratch environment and read `rotatedInterfaceKeys` from the
+   interface's `/health`, or compute it offline.
+2. **Add** it to `AUTHORITY_INTERFACE_KEY` beside the current one and
+   deploy. Both keys now verify; nothing has changed for users.
+3. Set the authority's entry in `MODERATION_INTERFACE_KEY_EPOCHS` and
+   deploy. The interface signs with the new key from here on, and the
+   countersignatures it issued before still verify because the
+   authority still lists the old key.
+4. Remove the old key from `AUTHORITY_INTERFACE_KEY` and deploy.
+
+Step 4 is the only irreversible one, and it is the point: it is what
+stops the old key working. Everything before it can be walked back.
+
+Doing steps 2 and 3 in the other order, or skipping the list and
+swapping a single value, means every registration for that authority is
+refused until both sides agree — there is no ordering of a single-key
+swap that avoids it.
+
+An authority you have never rotated needs no entry in either place. And
+note the failure mode of getting the component id wrong: it parses
+fine, silently leaves that authority on epoch 0, and shows up as a
+*signature* error rather than a configuration one. The interface names
+every configured id in its boot log beside the key it produced —
+compare it against what the mandates actually carry.
 
 Re-runs are idempotent: `deploy.sh` reuses the existing droplet named
 `onym-infra` (adopting it by name), so repeat CI runs **update** the box
