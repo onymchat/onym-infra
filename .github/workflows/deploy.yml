@@ -1,8 +1,9 @@
 name: Deploy
 
 # Deploys the consolidated onym.app stack (Caddy + strfry + blossom +
-# relayer) to DigitalOcean by running deploy/digitalocean/deploy.sh with
-# config sourced from repo Secrets/Variables instead of a local .env.
+# relayer + the two moderation services) to DigitalOcean by running
+# deploy/digitalocean/deploy.sh with config sourced from repo
+# Secrets/Variables instead of a local .env.
 # Manual trigger only — infra changes should be deliberate.
 #
 # Required repository SECRETS:
@@ -12,9 +13,38 @@ name: Deploy
 #   RELAYER_SECRET_KEY  Stellar secret key (S...)
 #   RELAYER_AUTH_TOKENS (optional) comma-separated bearer tokens
 #
+# Moderation SECRETS:
+#   MODERATION_DEVICECHECK_KEY_PEM   Contents of AuthKey_<KEYID>.p8, newlines as \n
+#   MODERATION_DEVICECHECK_KEY_ID    10-character DeviceCheck key id
+#   MODERATION_DEVICECHECK_TEAM_ID   10-character Apple team id
+#   MODERATION_INTERFACE_SIGNING_SEED  64 hex chars (openssl rand -hex 32)
+#   AUTHORITY_SIGNING_SEED           64 hex chars. Never rotate it while bans
+#                                    run — verdicts already issued stop verifying
+#   MODERATION_AUTHORITY_TOKEN       Shared bearer token for POST /v1/verdicts.
+#                                    The SAME value is the authority's
+#                                    AUTHORITY_INTERFACE_TOKEN — one secret, two files
+#   AUTHORITY_MODERATOR_TOKEN        (optional) bearer token for the JSON decision API
+#   AUTHORITY_ADMIN_TOKEN            Required while triage is off: bearer token for the
+#                                    human decision and appeal panel at /admin
+#   MODERATION_AUDIT_TOKEN           (optional) bearer token for GET /v1/write-log
+#
 # Repository VARIABLES (optional — defaults shown in the workflow):
 #   DOMAIN, NOSTR_HOST, BLOSSOM_HOST, RELAYER_HOST, CADDY_EMAIL,
 #   DO_REGION, DO_DROPLET_SIZE
+#   MODERATION_HOST, AUTHORITY_HOST
+#   MODERATION_DEVICECHECK_ENV       production | development
+#   MODERATION_ENFORCE_SIGNATURES    Defaults true. Set false only as an
+#                                    explicit, temporary diagnostic override;
+#                                    it lets the shared token mark devices
+#                                    without a verifiable verdict
+#   AUTHORITY_INTERFACE_KEY          The interface's PUBLIC countersigning key,
+#                                    onym:key:<hex>. It is derived from
+#                                    MODERATION_INTERFACE_SIGNING_SEED and does not
+#                                    exist until the interface has booted once, so it
+#                                    is a variable rather than a secret: leave it
+#                                    empty on the first deploy, read
+#                                    `interfaceKey` from its `/health`, set it,
+#                                    and re-run
 #   DROPLET_ID          set this after the first run (printed in the job
 #                       summary) so subsequent runs reuse the same box
 
@@ -28,7 +58,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (with relayer submodule)
+      # `recursive` covers both submodules — relayer and moderation —
+      # so the two new build contexts are present without further work.
+      - name: Checkout (with relayer + moderation submodules)
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -56,6 +88,17 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           RELAYER_SECRET_KEY: ${{ secrets.RELAYER_SECRET_KEY }}
           RELAYER_AUTH_TOKENS: ${{ secrets.RELAYER_AUTH_TOKENS }}
+          MODERATION_DEVICECHECK_KEY_PEM: ${{ secrets.MODERATION_DEVICECHECK_KEY_PEM }}
+          MODERATION_DEVICECHECK_KEY_ID: ${{ secrets.MODERATION_DEVICECHECK_KEY_ID }}
+          MODERATION_DEVICECHECK_TEAM_ID: ${{ secrets.MODERATION_DEVICECHECK_TEAM_ID }}
+          MODERATION_INTERFACE_SIGNING_SEED: ${{ secrets.MODERATION_INTERFACE_SIGNING_SEED }}
+          MODERATION_AUDIT_TOKEN: ${{ secrets.MODERATION_AUDIT_TOKEN }}
+          # One secret, written into both files: the token the authority
+          # presents to the interface is the token the interface expects.
+          MODERATION_AUTHORITY_TOKEN: ${{ secrets.MODERATION_AUTHORITY_TOKEN }}
+          AUTHORITY_SIGNING_SEED: ${{ secrets.AUTHORITY_SIGNING_SEED }}
+          AUTHORITY_MODERATOR_TOKEN: ${{ secrets.AUTHORITY_MODERATOR_TOKEN }}
+          AUTHORITY_ADMIN_TOKEN: ${{ secrets.AUTHORITY_ADMIN_TOKEN }}
         run: |
           cat > .env <<EOF
           DO_API_KEY=$DO_API_KEY
@@ -64,6 +107,11 @@ jobs:
           NOSTR_HOST=${{ vars.NOSTR_HOST || 'nostr.onym.app' }}
           BLOSSOM_HOST=${{ vars.BLOSSOM_HOST || 'blossom.onym.app' }}
           RELAYER_HOST=${{ vars.RELAYER_HOST || 'relayer.onym.app' }}
+          MODERATION_HOST=${{ vars.MODERATION_HOST || 'moderation.onym.app' }}
+          AUTHORITY_HOST=${{ vars.AUTHORITY_HOST || 'authority.onym.app' }}
+          MODERATION_DEVICECHECK_ENV=${{ vars.MODERATION_DEVICECHECK_ENV || 'production' }}
+          MODERATION_ENFORCE_SIGNATURES=${{ vars.MODERATION_ENFORCE_SIGNATURES || 'true' }}
+          AUTHORITY_INTERFACE_KEY=${{ vars.AUTHORITY_INTERFACE_KEY }}
           CADDY_EMAIL=${{ vars.CADDY_EMAIL || 'rinat@qda.one' }}
           DO_REGION=${{ vars.DO_REGION || 'ams3' }}
           DO_DROPLET_SIZE=${{ vars.DO_DROPLET_SIZE || 's-1vcpu-2gb' }}
@@ -74,6 +122,33 @@ jobs:
           cat > relayer.env <<EOF
           RELAYER_SECRET_KEY=$RELAYER_SECRET_KEY
           RELAYER_AUTH_TOKENS=$RELAYER_AUTH_TOKENS
+          EOF
+
+          # The .p8 goes in on one line: apple/src/config.rs reads
+          # MODERATION_DEVICECHECK_KEY_PEM as an alternative to a key
+          # path and un-escapes \n. Folding any real newlines here means
+          # a secret pasted straight out of the file still produces a
+          # parseable env file rather than five broken lines.
+          DEVICECHECK_KEY_PEM_ONE_LINE="${MODERATION_DEVICECHECK_KEY_PEM//$'\n'/\\n}"
+          cat > moderation.env <<EOF
+          MODERATION_DEVICECHECK_KEY_PEM=$DEVICECHECK_KEY_PEM_ONE_LINE
+          MODERATION_DEVICECHECK_KEY_ID=$MODERATION_DEVICECHECK_KEY_ID
+          MODERATION_DEVICECHECK_TEAM_ID=$MODERATION_DEVICECHECK_TEAM_ID
+          MODERATION_INTERFACE_SIGNING_SEED=$MODERATION_INTERFACE_SIGNING_SEED
+          MODERATION_AUTHORITY_TOKEN=$MODERATION_AUTHORITY_TOKEN
+          MODERATION_AUDIT_TOKEN=$MODERATION_AUDIT_TOKEN
+          EOF
+
+          # AUTHORITY_INTERFACE_TOKEN is deliberately the same secret as
+          # the interface's MODERATION_AUTHORITY_TOKEN above — it is one
+          # shared token seen from two sides, and two independently
+          # rotated values would just be a delivery outage waiting to
+          # happen.
+          cat > authority.env <<EOF
+          AUTHORITY_SIGNING_SEED=$AUTHORITY_SIGNING_SEED
+          AUTHORITY_INTERFACE_TOKEN=$MODERATION_AUTHORITY_TOKEN
+          AUTHORITY_MODERATOR_TOKEN=$AUTHORITY_MODERATOR_TOKEN
+          AUTHORITY_ADMIN_TOKEN=$AUTHORITY_ADMIN_TOKEN
           EOF
 
       - name: Deploy
