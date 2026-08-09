@@ -48,6 +48,16 @@
 # mandate's pinned hash against what this authority publishes.
 {$AUTHORITY_HOST} {
 	encode zstd gzip
+	# The manifest's detached operator signature, produced at deploy
+	# time by `sign-manifest` over the exact materialized bytes.
+	# Served by Caddy because the authority serves only /manifest.json
+	# and /v1/*; clients fetch `<manifest-url>.sig` and verify before
+	# trusting the manifest's terms.
+	handle /manifest.json.sig {
+		root * /srv/authority-manifest
+		header Content-Type "text/plain; charset=utf-8"
+		file_server
+	}
 	# The manifest links out to the nine documents its terms are
 	# written in — /policy/csam, /policy/evidence-rules, and seven
 	# more. Those are what a user reads *before* consenting, so a 404

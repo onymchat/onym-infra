@@ -49,6 +49,13 @@ services:
       # than application data, and the authority serves only
       # /manifest.json and /v1/*, so Caddy is what routes them.
       - ./moderation/authority/published:/srv/policy:ro
+      # The materialized manifest directory, for serving the detached
+      # signature. deploy.sh writes manifest.json.sig next to the
+      # manifest it signs; the authority itself serves only
+      # /manifest.json and /v1/*, so Caddy is what routes the `.sig`
+      # (clients verify the manifest's exact bytes against the
+      # directory-pinned operator key before trusting the terms).
+      - ./runtime/authority-manifest:/srv/authority-manifest:ro
       # Persists issued certificates + ACME account across restarts.
       # Losing this volume just means Caddy re-issues on next boot.
       - caddy-data:/data

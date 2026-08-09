@@ -135,6 +135,37 @@ are served as the published Markdown itself
 are the bytes that were signed off, and serving them verbatim keeps
 what a user reads identical to what was reviewed.
 
+## The manifest signature
+
+`https://$AUTHORITY_HOST/manifest.json.sig` is the detached Ed25519
+operator signature over the **exact bytes** of the published
+`manifest.json`. Clients (the iOS `SignedAsset` verifier) fetch it and
+verify the manifest against the directory-pinned operator key before
+trusting the terms inside; while it 404s they can only accept the
+manifest soft-verified.
+
+`deploy.sh` produces it on every deploy: the manifest is materialized
+to a staging name, signed **inside the authority image** (the seed
+never leaves `authority.env`, same as `derive-operator-key`), and only
+then is the live pair touched — old signature retired, new manifest
+moved into place, new signature written last. A signing failure leaves
+the previous manifest+signature pair fully intact; any later
+interruption degrades to a missing signature (404 → soft-verify). At
+no instant can the published signature cover different bytes than the
+published manifest.
+
+Wire contract, pinned here because two repos depend on it: the body is
+**base64 of the 64-byte raw signature, plus a trailing LF** — 89 bytes
+total. The iOS verifier trims whitespace before decoding
+(`SignedAsset.decodeSignature`); any other consumer must do the same.
+
+Two-step ordering with the client: this asset must be live and
+verified (the deploy's verify step compares the served pair against
+what it just signed) **before**
+`ModerationTrust.enforceManifestSignatures` is flipped on in onym-ios
+— under enforcement, a 404 or a stale signature rejects the manifest
+and blocks consent outright.
+
 ## Deploy via GitHub Actions
 
 `.github/workflows/deploy.yml` runs the same `deploy.sh` from CI
