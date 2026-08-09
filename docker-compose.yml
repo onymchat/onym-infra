@@ -1,14 +1,23 @@
 name: onym-infra
 
 # Consolidated onym.app backend: Nostr relay (strfry), Blossom media
-# server, and the Soroban contract relayer — all behind Caddy, which
-# terminates TLS and provisions/renews Let's Encrypt certificates
-# automatically (no certbot sidecar, no cron, no manual renewal).
+# server, the Soroban contract relayer, and the two moderation services
+# — all behind Caddy, which terminates TLS and provisions/renews Let's
+# Encrypt certificates automatically (no certbot sidecar, no cron, no
+# manual renewal).
 #
 # Hostnames are env-driven (see .env) so the same stack can serve a
 # staging domain without edits. Caddy reaches each service by its
 # compose name over the private `internal` network; only Caddy
 # publishes ports to the host.
+#
+# The two moderation services are folded in from onym-moderation, whose
+# repository ships each of them as a standalone stack with its own
+# Caddy. Those Caddies, their published ports and their private
+# networks are all dropped here in favour of this one — the services
+# themselves are unchanged, and keeping them on the same box as the
+# relay is deliberate: the authority reaches the interface over the
+# private network, so a verdict never crosses the public internet twice.
 
 services:
   caddy:
@@ -24,6 +33,8 @@ services:
       - NOSTR_HOST=${NOSTR_HOST:-nostr.onym.app}
       - BLOSSOM_HOST=${BLOSSOM_HOST:-blossom.onym.app}
       - RELAYER_HOST=${RELAYER_HOST:-relayer.onym.app}
+      - MODERATION_HOST=${MODERATION_HOST:-moderation.onym.app}
+      - AUTHORITY_HOST=${AUTHORITY_HOST:-authority.onym.app}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Persists issued certificates + ACME account across restarts.
@@ -31,7 +42,7 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     networks: [internal]
-    depends_on: [nostr-relay, blossom, relayer]
+    depends_on: [nostr-relay, blossom, relayer, moderation, authority]
 
   nostr-relay:
     image: dockurr/strfry:latest
@@ -65,11 +76,105 @@ services:
       - RELAYER_BIND=0.0.0.0:8080
     networks: [internal]
 
+  # The enforcement backend — "the interface" in onym-moderation's
+  # vocabulary. It holds the Apple DeviceCheck key, and the only write
+  # path to any device's bits runs through it, which is why it stays on
+  # the private network with no published port of its own.
+  moderation:
+    build:
+      context: ./moderation/apple
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Secrets (the DeviceCheck .p8 and key/team ids, the interface
+    # signing seed, the token the authority presents) live in
+    # moderation.env — never committed. See moderation.env.example.
+    env_file: ./moderation.env
+    environment:
+      # Bind on all interfaces inside the container so Caddy can reach
+      # it; the port is NOT published to the host.
+      - MODERATION_BIND=0.0.0.0:8080
+      - MODERATION_STORE_PATH=/data/moderation.sqlite
+      - MODERATION_DEVICECHECK_ENV=${MODERATION_DEVICECHECK_ENV:-production}
+      - MODERATION_INTERFACE_COMPONENT_ID=${MODERATION_INTERFACE_COMPONENT_ID:-onym:component:onym-ios}
+      # Whether a verdict must carry a signature that verifies against
+      # the authority's published key. Off is only correct until the
+      # authority is actually signing; with it off, anything that can
+      # reach POST /v1/verdicts with the shared token can mark a device.
+      - MODERATION_ENFORCE_SIGNATURES=${MODERATION_ENFORCE_SIGNATURES:-false}
+      # Left false on purpose: without it, an unset MODERATION_AUTHORITY_TOKEN
+      # fails closed rather than leaving the verdict endpoint open.
+      - MODERATION_ALLOW_UNAUTHENTICATED_AUTHORITY=${MODERATION_ALLOW_UNAUTHENTICATED_AUTHORITY:-false}
+      - MODERATION_SESSION_MAX_SKEW_SECS=${MODERATION_SESSION_MAX_SKEW_SECS:-300}
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      # The verdict record and the write log. Losing this volume loses
+      # the meaning behind every bit Apple is holding — the bits alone
+      # cannot be reconstructed into verdicts — so back it up.
+      - moderation-data:/data
+    networks: [internal]
+
+  # The moderation authority. It opens cases, decides them, and signs
+  # verdicts; it has no Apple credentials and no way to mark a device
+  # itself. That separation is the point, so resist giving this service
+  # a write path to a device in some future edit.
+  authority:
+    build:
+      context: ./moderation/authority
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Secrets (the verdict signing seed, the interface token, the
+    # moderator and admin tokens) live in authority.env — never
+    # committed. See authority.env.example.
+    env_file: ./authority.env
+    environment:
+      - AUTHORITY_BIND=0.0.0.0:8080
+      - AUTHORITY_STORE_PATH=/data/authority.sqlite
+      - AUTHORITY_MANIFEST_PATH=/manifest/manifest.json
+      # Verdicts are delivered to the sibling interface. The URL is
+      # derived from MODERATION_HOST rather than configured separately
+      # so the two can never drift apart.
+      - AUTHORITY_INTERFACE_URL=https://${MODERATION_HOST:-moderation.onym.app}
+      # The interface's *public* countersigning key (onym:key:<hex>),
+      # used to check that a registered mandate really was
+      # countersigned. It is derived from the interface's signing seed
+      # and cannot be known until the interface has booted once and
+      # logged it, so this is empty on a first deploy and set after.
+      - AUTHORITY_INTERFACE_KEY=${AUTHORITY_INTERFACE_KEY:-}
+      - AUTHORITY_DEADLINE_SWEEP_SECS=${AUTHORITY_DEADLINE_SWEEP_SECS:-300}
+      # Automated triage is off here. Turning it on means adding a
+      # model container to this stack — the authority deliberately
+      # defaults to a sibling on the private network, because case
+      # evidence was disclosed for adjudication and shipping it to
+      # someone else's API is a disclosure of its own.
+      - AUTHORITY_TRIAGE_MODE=${AUTHORITY_TRIAGE_MODE:-off}
+      - AUTHORITY_TRIAGE_URL=${AUTHORITY_TRIAGE_URL:-http://moderation-model:8000/v1/chat/completions}
+      - AUTHORITY_TRIAGE_PROFILE=${AUTHORITY_TRIAGE_PROFILE:-}
+      - AUTHORITY_TRIAGE_SERVED_MODEL=${AUTHORITY_TRIAGE_SERVED_MODEL:-}
+      - AUTHORITY_TRIAGE_TIMEOUT_SECS=${AUTHORITY_TRIAGE_TIMEOUT_SECS:-120}
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      # Cases, reports, reporter track records, and issued verdicts.
+      # Losing this loses the record behind every mark the interface is
+      # holding — and an accused person's evidence that a case existed.
+      - authority-data:/data
+      # The published manifest, served byte-for-byte because users'
+      # mandates pin the SHA-256 of these exact bytes. Editing this
+      # file after anyone has consented silently invalidates their
+      # mandates. The directory is empty in a fresh onym-moderation
+      # checkout — the manifest is the operator's published document,
+      # not the upstream repo's — so put yours at
+      # moderation/authority/manifest/manifest.json before deploying,
+      # starting from moderation/authority/manifest.example.json.
+      - ./moderation/authority/manifest:/manifest:ro
+    networks: [internal]
+
 volumes:
   caddy-data:
   caddy-config:
   strfry-data:
   blossom-data:
+  moderation-data:
+  authority-data:
 
 networks:
   internal:

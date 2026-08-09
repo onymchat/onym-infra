@@ -1,6 +1,11 @@
 # Secrets — never commit
 .env
 relayer.env
+moderation.env
+authority.env
+
+# The Apple DeviceCheck signing key, wherever it lands.
+*.p8
 
 # Local noise
 *.log

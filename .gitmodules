@@ -1,3 +1,6 @@
 [submodule "relayer"]
 	path = relayer
 	url = https://github.com/onymchat/onym-relayer.git
+[submodule "moderation"]
+	path = moderation
+	url = https://github.com/onymchat/onym-moderation.git
