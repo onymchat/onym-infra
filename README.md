@@ -15,8 +15,20 @@ via Docker Compose:
 The two moderation services are one seat split in half on purpose: the
 authority can judge but not enforce, the interface can enforce but not
 judge. `onym-moderation` ships each as a standalone stack with its own
-Caddy; here they are folded into this one, and the authority reaches
-the interface over the private network rather than the public internet.
+Caddy; here they are folded into this one.
+
+They share a box for cost, and nothing depends on it. In the contract
+they are separate operators, so the authority delivers verdicts to the
+interface's **public** hostname rather than over this network — the day
+the interface moves to its own droplet, or to a vendor who is not us,
+that address points somewhere else and nothing else changes. It also
+means this deployment exercises the same TLS-plus-token-plus-signature
+path every other deployment has to use.
+
+The one thing that genuinely must stay on the private network is the
+triage model container, if it is ever enabled: case evidence was
+disclosed for adjudication, and sending it to a third party is a
+further disclosure. Different relationship, different rule.
 
 TLS is handled entirely by Caddy — no certbot, no cron, no manual
 renewals. Certificates are provisioned on first request and renewed

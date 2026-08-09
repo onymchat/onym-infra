@@ -14,10 +14,17 @@ name: onym-infra
 # The two moderation services are folded in from onym-moderation, whose
 # repository ships each of them as a standalone stack with its own
 # Caddy. Those Caddies, their published ports and their private
-# networks are all dropped here in favour of this one — the services
-# themselves are unchanged, and keeping them on the same box as the
-# relay is deliberate: the authority reaches the interface over the
-# private network, so a verdict never crosses the public internet twice.
+# networks are all dropped here in favour of this one; the services
+# themselves are unchanged.
+#
+# They share a box for cost, and for no other reason. In the contract
+# they are *different operators* — the authority decides and signs, the
+# interface vendor executes, and neither can do the other's half. That
+# is why they duplicate `canonical.rs` instead of sharing a crate: they
+# must agree on bytes, not on code. Co-location here is an accident of
+# this deployment and nothing may be built on it, which is why the
+# authority reaches the interface over its public hostname and not over
+# this network — see `AUTHORITY_INTERFACE_URL` below.
 
 services:
   caddy:
@@ -135,9 +142,29 @@ services:
       - AUTHORITY_BIND=0.0.0.0:8080
       - AUTHORITY_STORE_PATH=/data/authority.sqlite
       - AUTHORITY_MANIFEST_PATH=/manifest/manifest.json
-      # Verdicts are delivered to the sibling interface. The URL is
-      # derived from MODERATION_HOST rather than configured separately
-      # so the two can never drift apart.
+      # Verdicts are delivered to the interface over its **public**
+      # hostname, deliberately, even though it happens to be running in
+      # the container next door.
+      #
+      # `http://moderation:8080` would be one hop shorter and would not
+      # wait on ACME at first boot. It would also hardcode the
+      # assumption that these two are the same operator on the same
+      # machine, which the contract says they are not: the interface
+      # vendor is a separate party, and this box is a cost decision.
+      # The day the interface moves — to its own droplet, or to a vendor
+      # who is not us — a private service name is a broken deployment
+      # and a comment nobody can explain, while a public hostname simply
+      # points somewhere else.
+      #
+      # It also means the reference deployment exercises the same path
+      # every other deployment must use: TLS, the shared bearer token,
+      # and a verdict signature the interface verifies independently.
+      # A private shortcut here would leave that path untested by the
+      # one deployment best placed to test it.
+      #
+      # Derived from MODERATION_HOST rather than configured separately,
+      # so the interface's address and the authority's idea of it cannot
+      # drift — and so it keeps working when that host is elsewhere.
       - AUTHORITY_INTERFACE_URL=https://${MODERATION_HOST:-moderation.onym.app}
       # The interface's *public* countersigning key (onym:key:<hex>),
       # used to check that a registered mandate really was
