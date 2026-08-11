@@ -7,6 +7,9 @@
 # Idempotent: reuses the droplet recorded in .env, re-syncs config, and
 # rebuilds containers. Safe to run repeatedly.
 #
+# Images come from a container registry when DOCR_NAME is set, and are
+# built on the droplet when it is not. See "Container images" below.
+#
 # Usage:
 #   cp .env.example .env && $EDITOR .env          # fill DO_API_KEY, CF_API_TOKEN, ...
 #   cp relayer.env.example relayer.env && $EDITOR relayer.env   # fill RELAYER_SECRET_KEY, ...
@@ -99,6 +102,13 @@ save_env() {
 for c in doctl ssh rsync curl python3 dig shasum; do
     command -v "$c" >/dev/null || { err "missing required command: $c"; exit 1; }
 done
+# Only registry mode builds anything locally; legacy mode still builds
+# on the droplet and needs no local Docker at all.
+if [ -n "${DOCR_NAME:-}" ]; then
+    command -v docker >/dev/null || { err "DOCR_NAME is set but docker is not installed."; exit 1; }
+    docker buildx version >/dev/null 2>&1 \
+        || { err "DOCR_NAME is set but 'docker buildx' is unavailable."; exit 1; }
+fi
 [ -f "$SSH_KEY_PATH" ] || { err "SSH key not found at $SSH_KEY_PATH"; exit 1; }
 
 info "Config: domain=$DOMAIN size=$DO_DROPLET_SIZE region=$DO_REGION"
@@ -118,6 +128,113 @@ if ! doctl compute ssh-key get "$SSH_FP" &>/dev/null; then
     ok "SSH key uploaded"
 else
     ok "SSH key already present"
+fi
+
+# ─── Container images ─────────────────────────────────────────────────
+#
+# Two modes, chosen by DOCR_NAME:
+#
+#   set    Images are built here (or found already built) and PULLED on
+#          the droplet. Tags are the submodule commit, so an unchanged
+#          submodule skips the build entirely — the common case for a
+#          config-only deploy — and the droplet never compiles Rust.
+#
+#   unset  Legacy: sources are rsynced and built in place. It works, and
+#          it is also why this deployment cannot be more than one box —
+#          three Rust builds on a 2GB droplet, serialized so they do not
+#          OOM. Nothing here is a second machine until images are built
+#          once and pulled many times.
+#
+# The registry authenticates with the DO_API_KEY this script already
+# requires, so turning it on adds no new secret — only a one-time
+# `doctl registry create`.
+#
+# This runs before the droplet exists on purpose: a build that fails
+# should fail before any infrastructure is created or mutated.
+
+DOCR_NAME="${DOCR_NAME:-}"
+DOCR_HOST="registry.digitalocean.com"
+# Refreshed on every deploy, so an abandoned box loses its pull
+# credential by going stale rather than by anyone remembering to revoke.
+DOCR_CRED_TTL="${DOCR_CRED_TTL:-2592000}"   # 30 days
+BUILDX_BUILDER="onym-infra"
+RELAYER_IMAGE=""; MODERATION_IMAGE=""; AUTHORITY_IMAGE=""
+
+# <image-name> <build-context> -> a registry ref tagged with the commit
+# of the submodule that context lives in.
+image_ref() {
+    local name="$1" context="$2" sha suffix=""
+    sha="$(git -C "$REPO_ROOT/$context" rev-parse --short=12 HEAD 2>/dev/null)" \
+        || { err "$context is not a git checkout — is the submodule initialized?"; exit 1; }
+    # A dirty context gets a -dirty tag and is always rebuilt: the SHA
+    # has stopped describing what would be built, and quietly shipping
+    # the last clean image is the wrong way to lose someone's edit.
+    # Scoped with `-- .` so uncommitted work in apple/ does not force a
+    # rebuild of authority/, which shares its submodule.
+    [ -z "$(git -C "$REPO_ROOT/$context" status --porcelain -- . 2>/dev/null)" ] || suffix="-dirty"
+    printf '%s/%s/%s:%s%s' "$DOCR_HOST" "$DOCR_NAME" "$name" "$sha" "$suffix"
+}
+
+ensure_image() {
+    local ref="$1" context="$2"
+    # The whole context is uploaded to the builder, and a Rust context
+    # that has been built in carries a target/ tree far larger than the
+    # source. Building on the droplet never hit this — rsync excluded
+    # target/ explicitly — so the exclusion has to exist in the context
+    # itself now. relayer/ ships one; the two moderation contexts do
+    # not (onym-moderation follow-up). Fresh CI checkouts are
+    # unaffected, so this warns rather than blocks.
+    if [ ! -f "$REPO_ROOT/$context/.dockerignore" ] && [ -d "$REPO_ROOT/$context/target" ]; then
+        warn "  $context has a target/ tree and no .dockerignore — the build"
+        warn "  context will include it. Add .dockerignore upstream (see relayer/)."
+    fi
+    if [[ "$ref" != *-dirty ]] && docker manifest inspect "$ref" >/dev/null 2>&1; then
+        ok "  $ref (already built)"
+        return
+    fi
+    info "  building $ref"
+    # --platform is not optional. The droplet is amd64; a developer on
+    # Apple silicon would otherwise push an arm64 image that deploys
+    # cleanly and then dies with exec format error at the far end.
+    # The docker-container driver is what makes cross-building and
+    # --push work the same way on a laptop and on a CI runner.
+    docker buildx build --builder "$BUILDX_BUILDER" \
+        --platform linux/amd64 --push -t "$ref" "$REPO_ROOT/$context"
+}
+
+if [ -n "$DOCR_NAME" ]; then
+    info "Container images: $DOCR_HOST/$DOCR_NAME"
+    # DigitalOcean allows exactly one registry per account, so this is a
+    # name check rather than a lookup — and a mismatch means DOCR_NAME
+    # is wrong, not that a registry is missing.
+    if ! doctl registry get >/dev/null 2>&1; then
+        err "This DigitalOcean account has no container registry."
+        err "It is a billed resource, so this script will not create one for you:"
+        err "  doctl registry create $DOCR_NAME --region $DO_REGION"
+        exit 1
+    fi
+    # Only a positively-read, differing name is an error. An unreadable
+    # one (doctl changed its columns) falls through to the login, which
+    # fails loudly on its own rather than being blocked here by a
+    # cosmetic parse.
+    REGISTRY_NAME="$(doctl registry get --format Name --no-header 2>/dev/null | head -1 | tr -d '[:space:]')"
+    if [ -n "$REGISTRY_NAME" ] && [ "$REGISTRY_NAME" != "$DOCR_NAME" ]; then
+        err "DOCR_NAME is '$DOCR_NAME' but this account's registry is '$REGISTRY_NAME'."
+        exit 1
+    fi
+    doctl registry login >/dev/null
+    docker buildx inspect "$BUILDX_BUILDER" >/dev/null 2>&1 \
+        || docker buildx create --name "$BUILDX_BUILDER" --driver docker-container >/dev/null
+
+    RELAYER_IMAGE="$(image_ref relayer relayer)"
+    MODERATION_IMAGE="$(image_ref moderation-apple moderation/apple)"
+    AUTHORITY_IMAGE="$(image_ref moderation-authority moderation/authority)"
+    ensure_image "$RELAYER_IMAGE"    relayer
+    ensure_image "$MODERATION_IMAGE" moderation/apple
+    ensure_image "$AUTHORITY_IMAGE"  moderation/authority
+    ok "Images ready"
+else
+    warn "DOCR_NAME unset — building on the droplet. See README: Container images."
 fi
 
 # ─── Create or reuse droplet ──────────────────────────────────────────
@@ -245,13 +362,35 @@ AUTHORITY_INTERFACE_KEY=${AUTHORITY_INTERFACE_KEY:-}
 AUTHORITY_TRIAGE_MODE=${AUTHORITY_TRIAGE_MODE:-off}
 AUTHORITY_QA_ALLOW_EARLY_BAN=${AUTHORITY_QA_ALLOW_EARLY_BAN:-false}
 CADDY_EMAIL=$CADDY_EMAIL
+# Empty in legacy mode; compose then falls back to the :local tags that
+# a droplet-side build produces.
+RELAYER_IMAGE=$RELAYER_IMAGE
+MODERATION_IMAGE=$MODERATION_IMAGE
+AUTHORITY_IMAGE=$AUTHORITY_IMAGE
 EOF
 scp "${SSH_OPTS[@]}" "$RELAYER_ENV" "root@$DROPLET_IP:/opt/onym-infra/relayer.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$MODERATION_ENV" "root@$DROPLET_IP:/opt/onym-infra/moderation.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$AUTHORITY_ENV" "root@$DROPLET_IP:/opt/onym-infra/authority.env" >/dev/null
 
-info "Building containers serially (three Rust builds; the first run takes a while)..."
-ssh_do "cd /opt/onym-infra && mkdir -p runtime/authority-manifest && COMPOSE_PARALLEL_LIMIT=1 docker compose build"
+ssh_do "mkdir -p /opt/onym-infra/runtime/authority-manifest"
+
+NO_BUILD=""
+if [ -n "$DOCR_NAME" ]; then
+    NO_BUILD="--no-build"
+    info "Granting the droplet read-only registry access..."
+    # Read-only on purpose. The droplet pulls; nothing running on it
+    # should be able to push an image back into the registry that the
+    # next deploy will trust. Note this writes the whole docker config
+    # — the droplet has no other registry credentials to preserve.
+    doctl registry docker-config --read-only --expiry-seconds "$DOCR_CRED_TTL" \
+        | ssh_do "install -m 700 -d /root/.docker && cat > /root/.docker/config.json"
+
+    info "Pulling images on the droplet..."
+    ssh_do "cd /opt/onym-infra && docker compose pull"
+else
+    info "Building containers serially (three Rust builds; the first run takes a while)..."
+    ssh_do "cd /opt/onym-infra && COMPOSE_PARALLEL_LIMIT=1 docker compose build"
+fi
 
 # The upstream manifest is a reference template: its all-zero operator
 # cannot verify a verdict and the authority correctly refuses to boot
@@ -314,7 +453,7 @@ info "Starting containers..."
 # Force Authority recreation even when only the materialized manifest
 # changed. It reads the exact bytes once at boot; updating the bind
 # mount without restarting would leave the old manifest in memory.
-ssh_do "cd /opt/onym-infra && docker compose up -d --no-deps --force-recreate authority && docker compose up -d"
+ssh_do "cd /opt/onym-infra && docker compose up -d --no-deps --force-recreate $NO_BUILD authority && docker compose up -d $NO_BUILD"
 
 # ─── Verify ───────────────────────────────────────────────────────────
 
@@ -410,6 +549,11 @@ fi
 
 echo
 ok "Done. Droplet $DROPLET_ID @ $DROPLET_IP"
+if [ -n "$DOCR_NAME" ]; then
+    echo "  Images:     $RELAYER_IMAGE"
+    echo "              $MODERATION_IMAGE"
+    echo "              $AUTHORITY_IMAGE"
+fi
 echo "  Nostr:      wss://$NOSTR_HOST"
 echo "  Blossom:    https://$BLOSSOM_HOST"
 echo "  Relayer:    https://$RELAYER_HOST"

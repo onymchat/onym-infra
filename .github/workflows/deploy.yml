@@ -32,6 +32,13 @@ name: Deploy
 #   DOMAIN, NOSTR_HOST, BLOSSOM_HOST, RELAYER_HOST, CADDY_EMAIL,
 #   DO_REGION, DO_DROPLET_SIZE
 #   MODERATION_HOST, AUTHORITY_HOST
+#   DOCR_NAME           DigitalOcean container registry to build into and
+#                       pull from. Set it and the runner builds the three
+#                       images (skipping any whose submodule commit is
+#                       already built) and the droplet only pulls. Empty
+#                       keeps the old behaviour: sources rsynced and three
+#                       Rust builds run on the droplet itself. Uses
+#                       DO_API_KEY — no additional secret
 #   MODERATION_DEVICECHECK_ENV       production | development
 #   MODERATION_INTERFACE_KEY_EPOCHS  Per-authority countersigning epochs,
 #                                    <componentId>=<epoch> comma separated. Empty
@@ -76,6 +83,11 @@ jobs:
 
       - name: Install dig
         run: sudo apt-get update && sudo apt-get install -y dnsutils rsync
+
+      # Only used when DOCR_NAME is set. The runner is amd64 and the
+      # droplet is amd64, so this builds natively — no QEMU needed.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Write SSH key
         env:
@@ -122,6 +134,7 @@ jobs:
           CADDY_EMAIL=${{ vars.CADDY_EMAIL || 'rinat@qda.one' }}
           DO_REGION=${{ vars.DO_REGION || 'ams3' }}
           DO_DROPLET_SIZE=${{ vars.DO_DROPLET_SIZE || 's-1vcpu-2gb' }}
+          DOCR_NAME=${{ vars.DOCR_NAME }}
           SSH_KEY_PATH=$HOME/.ssh/deploy_key
           DROPLET_ID=${{ vars.DROPLET_ID }}
           DROPLET_IP=

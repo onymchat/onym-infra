@@ -82,6 +82,11 @@ services:
     networks: [internal]
 
   relayer:
+    # Pulled from the container registry when DOCR_NAME is set — the tag
+    # is the relayer submodule's commit. Unset, the fallback tag is
+    # whatever `docker compose build` last produced on this machine.
+    # See README: Container images.
+    image: ${RELAYER_IMAGE:-onym-infra-relayer:local}
     build:
       context: ./relayer
       dockerfile: Dockerfile
@@ -100,6 +105,7 @@ services:
   # path to any device's bits runs through it, which is why it stays on
   # the private network with no published port of its own.
   moderation:
+    image: ${MODERATION_IMAGE:-onym-infra-moderation:local}
     build:
       context: ./moderation/apple
       dockerfile: Dockerfile
@@ -142,6 +148,7 @@ services:
   # itself. That separation is the point, so resist giving this service
   # a write path to a device in some future edit.
   authority:
+    image: ${AUTHORITY_IMAGE:-onym-infra-authority:local}
     build:
       context: ./moderation/authority
       dockerfile: Dockerfile
