@@ -58,9 +58,9 @@
 		header Content-Type "text/plain; charset=utf-8"
 		file_server
 	}
-	# The manifest links out to the nine documents its terms are
-	# written in — /policy/csam, /policy/evidence-rules, and seven
-	# more. Those are what a user reads *before* consenting, so a 404
+	# The manifest links out to the ten documents its terms are
+	# written in — /policy/csam, /policy/evidence-rules,
+	# /policy/retention, and seven more. Those are what a user reads *before* consenting, so a 404
 	# here means the term was never published and nobody agreed to it.
 	# The authority itself serves only /manifest.json and /v1/*, which
 	# leaves the routing to Caddy.
