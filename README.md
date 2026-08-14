@@ -38,6 +38,8 @@ can't recur.
 ## Prerequisites
 
 - `doctl`, `ssh`, `rsync`, `curl`, `python3`, `dig` on your machine
+- `docker` with `buildx`, **only** if you set `DOCR_NAME` (see
+  [Container images](#container-images))
 - An SSH key (default `~/.ssh/id_ed25519`)
 - A DigitalOcean API token and a Cloudflare API token with `DNS:Edit`
   on the `onym.app` zone
@@ -87,7 +89,7 @@ the box.
 - **Config/compose change:** edit and re-run `deploy.sh` (re-syncs +
   `docker compose up -d`).
 - **Relayer code:** bump the submodule (`git -C relayer pull`), commit,
-  re-run `deploy.sh` (rebuilds the image).
+  re-run `deploy.sh` (rebuilds that one image).
 - **Moderation code:** same shape — `git -C moderation pull`, commit,
   re-run `deploy.sh`.
 - **The authority manifest and policy documents:** the reference
@@ -96,6 +98,78 @@ the box.
   deployment's operator key and `AUTHORITY_HOST`. Changing any of those
   bytes after consent creates a new manifest hash, so existing mandates
   remain bound to the old terms and fresh consent is required.
+
+## Container images
+
+Set `DOCR_NAME` and the droplet stops compiling anything. The three
+first-party images — relayer, moderation interface, moderation authority
+— are built wherever `deploy.sh` runs, pushed to the DigitalOcean
+container registry, and pulled on the far end. Leave it empty and the old
+behaviour is unchanged: sources are rsynced and built in place.
+
+```sh
+doctl registry create onym --region ams3   # once; it is a billed resource
+echo 'DOCR_NAME=onym' >> .env
+./deploy/digitalocean/deploy.sh
+```
+
+In CI it is the `DOCR_NAME` repository **variable**. It authenticates
+with `DO_API_KEY`, which is already required, so there is no new secret
+to hold. Note that DigitalOcean allows exactly one registry per account —
+`DOCR_NAME` must be its name, and a mismatch is a hard error rather than
+a second registry.
+
+**Tags are the submodule commit** (`…/relayer:a1b2c3d4e5f6`). Two things
+follow. A submodule that has not moved is already in the registry, so
+`deploy.sh` skips its build entirely — a config-only deploy builds
+nothing at all. And a deployed image can be traced to the exact commit it
+came from without consulting the deploy log.
+
+A context with uncommitted changes is tagged `-dirty` and is **always**
+rebuilt and repushed. The SHA has stopped describing what would be built,
+and silently shipping the last clean image is the wrong way to lose
+someone's edit. `moderation/apple` and `moderation/authority` share a
+submodule, so dirtiness is scoped per directory — editing one does not
+force a rebuild of the other.
+
+Images are built `--platform linux/amd64` through a `docker-container`
+buildx builder. Both are load-bearing on an Apple silicon laptop: without
+them you push an arm64 image that deploys cleanly and then dies with
+`exec format error` on a droplet you cannot easily see.
+
+The droplet gets a **read-only** registry credential, refreshed on every
+deploy with a 30-day expiry (`DOCR_CRED_TTL`). It pulls; it can never
+push an image back that the next deploy would trust. An abandoned box
+loses access by going stale rather than by anyone remembering to revoke
+it. Since Docker's `restart: unless-stopped` restarts containers from
+local images, an expired credential blocks the next deploy — never a
+reboot.
+
+One rough edge, for local builds only. The build context is uploaded to
+the builder, and `rsync`'s `--exclude '*/target'` does not apply to it —
+so the exclusion has to live in the context. `relayer/` ships a
+`.dockerignore`; `moderation/apple` and `moderation/authority` do not,
+and a checkout that has been `cargo build`-ed locally carries hundreds of
+megabytes of `target/` into the context. `deploy.sh` warns when it sees
+this. The fix belongs upstream in `onym-moderation`; CI checks out fresh
+and is unaffected.
+
+Deterministic tags accumulate. The registry's storage is billed, so
+prune periodically:
+
+```sh
+doctl registry repository list
+doctl registry garbage-collection start
+```
+
+### Why this exists
+
+Building on the droplet is what makes this deployment structurally
+single-box: three Rust builds on a 2 GB machine, serialized with
+`COMPOSE_PARALLEL_LIMIT=1` so they do not OOM. Nothing here becomes a
+second machine, or an autoscaled anything, until images are built once
+and pulled many times. This is that change and nothing more — the stack
+is still one droplet.
 
 ## Bringing the moderation services up for the first time
 
