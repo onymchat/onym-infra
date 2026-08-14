@@ -7,8 +7,10 @@ name: tofu
 #                 same-repo PRs (explicit condition on the plan job —
 #                 the comment exposes infra inventory). NOTHING is
 #                 applied.
-#   push to main  plan + apply, gated behind the `production`
-#                 environment — a human approves every apply.
+#   push to main  ungated plan (saved as an artifact, shown in the
+#                 step summary) → apply of that EXACT saved plan,
+#                 gated behind the `production` environment — the
+#                 human approves a plan they can actually read.
 #   schedule      weekly drift plan; a non-empty diff opens (or
 #                 updates) a "tofu drift" issue.
 #
@@ -103,18 +105,30 @@ jobs:
 
       # Fork PRs never reach this job (see the job's `if`), but on a
       # fresh clone of this repo the secrets may simply not be
-      # configured yet; detect that instead of failing init with an
-      # opaque credentials error.
+      # configured yet; detect that instead of failing init or plan
+      # with an opaque credentials error. All FOUR are checked — a
+      # missing CF_API_TOKEN or TF_GITHUB_TOKEN would otherwise die
+      # mid-plan with exactly the provider error this step exists to
+      # avoid.
       - name: Check secret availability
         id: creds
         env:
           DO_API_KEY: ${{ secrets.DO_API_KEY }}
           SPACES_KEY: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+          CF_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          GH_PAT: ${{ secrets.TF_GITHUB_TOKEN }}
         run: |
-          if [ -n "$DO_API_KEY" ] && [ -n "$SPACES_KEY" ]; then
+          missing=""
+          [ -z "$DO_API_KEY" ] && missing="$missing DO_API_KEY"
+          [ -z "$SPACES_KEY" ] && missing="$missing SPACES_ACCESS_KEY_ID (+ its SECRET pair)"
+          [ -z "$CF_TOKEN" ]   && missing="$missing CF_API_TOKEN"
+          [ -z "$GH_PAT" ]     && missing="$missing TF_GITHUB_TOKEN"
+          if [ -z "$missing" ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Not configured on this repo yet:$missing" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "Skipping the plan (fmt + validate still ran). See terraform/README.md step 7." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: tofu plan
@@ -168,10 +182,57 @@ jobs:
           echo "Secrets are not configured on this repo yet," >> "$GITHUB_STEP_SUMMARY"
           echo "so no plan was produced. fmt + validate passed in the previous job." >> "$GITHUB_STEP_SUMMARY"
 
+  # The apply flow is TWO jobs on purpose: the environment gate on a
+  # single plan+apply job would fire BEFORE the plan exists, so the
+  # reviewer would approve with nothing to review — a "yes, deploy
+  # something" button. Instead: `plan-main` (ungated) produces tfplan
+  # and shows it in the step summary; `apply` (gated) applies THAT
+  # exact saved file — no re-plan, so what was reviewed is what runs.
+  plan-main:
+    name: plan (main)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: fmt-and-validate
+    runs-on: ubuntu-latest
+    concurrency:
+      group: tofu-state
+      cancel-in-progress: false
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DO_API_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+
+      - name: tofu init
+        run: tofu init -input=false
+
+      - name: tofu plan
+        run: |
+          tofu plan -input=false -no-color -out=tfplan
+          echo '### `tofu plan` awaiting approval' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Review this plan, then approve the `production` gate on the apply job — the SAVED plan below is exactly what will be applied.' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tofu show -no-color tfplan >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 7
+          if-no-files-found: error
+
   apply:
     name: apply (main)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: fmt-and-validate
+    needs: plan-main
     runs-on: ubuntu-latest
     # A human approves every apply: this is the `production` environment
     # on THIS repo, protected with required reviewers. Like the one
@@ -198,10 +259,19 @@ jobs:
       - name: tofu init
         run: tofu init -input=false
 
-      - name: tofu plan
-        run: tofu plan -input=false -no-color -out=tfplan
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform
 
-      - name: tofu apply
+      # Applies the EXACT saved plan the reviewer saw — no re-plan.
+      # Staleness is self-protecting: a saved plan records the state
+      # serial it was computed against, and if state moved while the
+      # approval sat in the queue (another apply, a local run), this
+      # apply ERRORS on the serial mismatch instead of applying a stale
+      # diff. On that error: re-run the workflow to get a fresh plan.
+      - name: tofu apply (saved plan)
         run: tofu apply -input=false -no-color tfplan
 
   drift:

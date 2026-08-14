@@ -56,9 +56,34 @@ resource "github_repository_environment" "production" {
   # Deploys wait for a human approval, not for a timer.
   wait_timer = 0
 
+  # Both knobs below are set EXPLICITLY because their defaults quietly
+  # hollow out the gate: `can_admins_bypass` defaults to true (an admin
+  # can skip review entirely) and `prevent_self_review` defaults to
+  # false (the sole reviewer can approve their own deploy). The gate
+  # must enforce what it records, so admin bypass is off.
+  can_admins_bypass = false
+
+  # ACCEPTED RESIDUAL RISK, on purpose: with exactly one human in the
+  # org, `prevent_self_review = true` would deadlock every deploy until
+  # a second reviewer (or a team/bot arrangement) exists. So this stays
+  # false — explicitly, not by default — meaning the reviewer can
+  # approve a deploy they themselves triggered. Flip this single line
+  # to true the moment there is a second reviewer.
+  prevent_self_review = false
+
   reviewers {
     users = var.production_reviewer_user_ids
     teams = var.production_reviewer_team_ids
+  }
+
+  # Production deploys only from protected branches — otherwise ANY
+  # branch or tag in these repos could target `production` and reach
+  # its secrets after one approval. Corollary for operators: `main`
+  # must actually BE protected in onym-discovery and onym-relayer, or
+  # their deploys fail this policy check (see the README checklist).
+  deployment_branch_policy {
+    protected_branches     = true
+    custom_branch_policies = false
   }
 }
 

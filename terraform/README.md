@@ -59,6 +59,13 @@ which every state-touching job (PR plan, apply, drift) joins. The
 corollary: never run `tofu apply` (or a state-refreshing plan) locally
 while CI could be applying — check the Actions tab first.
 
+One queue caveat: GitHub holds at most **one pending run per
+concurrency group** — a third arrival cancels the queued second, it
+does not line up behind it. So a missing weekly drift run may mean it
+was cancelled by busier traffic, not that there was no drift; check
+the Actions tab for a cancelled `drift` run before concluding
+anything.
+
 ## The secrets-never-in-state rule
 
 OpenTofu state stores every attribute in plaintext — `sensitive` only
@@ -144,6 +151,15 @@ command next to each one if you are bootstrapping much later.
    approval from the moment this applies**. That gate is the point,
    but it must not surprise the people whose deploys it stops.
 
+   Also on the operator checklist: the environments restrict deploys
+   to **protected branches** (`deployment_branch_policy` in
+   `github.tf`), so **`main` must actually be protected in
+   onym-discovery and onym-relayer** before their next deploy — an
+   unprotected `main` fails the branch policy check and the deploy
+   never starts. One-liner per repo:
+   `gh api -X PUT repos/onymchat/<repo>/branches/main/protection ...`
+   or Settings → Branches.
+
 6. **Apply**, then plan again — the second plan must be empty:
 
    ```bash
@@ -166,8 +182,12 @@ command next to each one if you are bootstrapping much later.
   comment is an infra inventory (droplet IP, zone/record ids) and
   because the unlocked state must not be touched on behalf of an
   untrusted head ref.
-- **Applies** happen only from main, and only after a human approves
-  the `production` environment gate.
+- **Applies** happen only from main, in two stages: an ungated job
+  produces and saves the plan (readable in the step summary), then the
+  `production`-gated job applies **that exact saved plan** — the
+  approver reviews the real diff, and a stale plan (state moved while
+  approval waited) errors on the state-serial mismatch instead of
+  applying.
 - **Drift**: every Monday CI runs `tofu plan -detailed-exitcode`; a
   non-empty diff opens (or appends to) an issue titled
   "tofu drift: …" with the plan attached. deploy.sh upserting the same

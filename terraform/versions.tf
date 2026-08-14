@@ -5,10 +5,13 @@
 # but nothing here promises to stay that way.
 
 terraform {
-  # Import blocks (imports.tf) need >= 1.5; the S3 backend `endpoints`
-  # map syntax (backend.tf) needs >= 1.6. Written and validated with
-  # OpenTofu 1.12.
-  required_version = ">= 1.8.0"
+  # The floor is set by the S3 backend's `use_lockfile` argument
+  # (backend.tf): it only exists as of OpenTofu 1.10, and on 1.8/1.9
+  # `tofu init` dies with an opaque "Unsupported argument" instead of a
+  # clear version message — so the version check must catch it first.
+  # (Import blocks need >= 1.5, backend `endpoints` map >= 1.6; both
+  # are subsumed.) Written and validated with OpenTofu 1.12.
+  required_version = ">= 1.10.0"
 
   required_providers {
     digitalocean = {
