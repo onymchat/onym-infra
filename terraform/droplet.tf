@@ -62,10 +62,24 @@ resource "digitalocean_firewall" "onym_infra" {
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
-  # HTTP/3 — compose publishes 443/udp for QUIC.
+  # 443/udp matches what compose publishes for HTTP/3 (QUIC), but this
+  # rule does NOT enable QUIC today: cloud-init's on-box ufw
+  # (deploy/digitalocean/deploy.sh) allows only 22,80,443/tcp, so UDP
+  # 443 is still dropped on the box. The rule only keeps the cloud
+  # firewall out of the way. Follow-up to actually enable HTTP/3:
+  # `ufw allow 443/udp` on the droplet (and in the cloud-init line).
   inbound_rule {
     protocol         = "udp"
     port_range       = "443"
+    source_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  # ICMP inbound so ping and path-MTU discovery keep reaching the box —
+  # a DO firewall default-denies everything unlisted, and losing
+  # inbound PMTU (fragmentation-needed) silently breaks large packets
+  # for some clients.
+  inbound_rule {
+    protocol         = "icmp"
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 

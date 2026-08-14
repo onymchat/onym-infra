@@ -2,9 +2,11 @@ name: tofu
 
 # OpenTofu (`tofu`, not `terraform`) CI for terraform/:
 #
-#   pull_request  fmt-check + validate always; a real `tofu plan` when
-#                 the repo's secrets are available (they are not on
-#                 fork PRs), posted as a PR comment. NOTHING is applied.
+#   pull_request  fmt-check + validate always (fork PRs included); a
+#                 real `tofu plan`, posted as a PR comment, only for
+#                 same-repo PRs (explicit condition on the plan job —
+#                 the comment exposes infra inventory). NOTHING is
+#                 applied.
 #   push to main  plan + apply, gated behind the `production`
 #                 environment — a human approves every apply.
 #   schedule      weekly drift plan; a non-empty diff opens (or
@@ -71,12 +73,27 @@ jobs:
 
   plan:
     name: plan (PR)
-    if: github.event_name == 'pull_request'
+    # Same-repo PRs only, by explicit condition — not by relying on
+    # fork PRs happening to see empty secrets. Two reasons: the plan
+    # comment embeds infrastructure inventory (droplet public IP,
+    # Cloudflare zone/record ids) that fork authors have no need to
+    # see, and a plan run refreshes state, which must never race an
+    # apply on behalf of an untrusted head ref.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     needs: fmt-and-validate
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
+    # State has NO backend-level lock (see terraform/backend.tf): this
+    # group is the only thing serializing state readers/writers, so the
+    # plan job joins it too — a PR plan must not run concurrently with
+    # an apply.
+    concurrency:
+      group: tofu-state
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -84,8 +101,10 @@ jobs:
         with:
           tofu_version: ${{ env.TOFU_VERSION }}
 
-      # Secrets are empty on PRs from forks; detect that instead of
-      # failing init with an opaque credentials error.
+      # Fork PRs never reach this job (see the job's `if`), but on a
+      # fresh clone of this repo the secrets may simply not be
+      # configured yet; detect that instead of failing init with an
+      # opaque credentials error.
       - name: Check secret availability
         id: creds
         env:
@@ -146,7 +165,7 @@ jobs:
         if: steps.creds.outputs.available != 'true'
         run: |
           echo "### tofu: validate-only" >> "$GITHUB_STEP_SUMMARY"
-          echo "Secrets are not available to this PR (fork, or not yet configured)," >> "$GITHUB_STEP_SUMMARY"
+          echo "Secrets are not configured on this repo yet," >> "$GITHUB_STEP_SUMMARY"
           echo "so no plan was produced. fmt + validate passed in the previous job." >> "$GITHUB_STEP_SUMMARY"
 
   apply:

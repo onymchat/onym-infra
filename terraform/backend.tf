@@ -45,5 +45,16 @@ terraform {
     skip_metadata_api_check     = true
     skip_region_validation      = true
     skip_s3_checksum            = true
+
+    # STATE IS NOT LOCKED. OpenTofu's S3-native lockfile (1.10+,
+    # `use_lockfile = true`) depends on conditional writes
+    # (If-None-Match), which DigitalOcean Spaces does not document
+    # supporting — an unverifiable lock is worse than an honest
+    # absence, so this is explicitly false. Serialization comes ONLY
+    # from the CI concurrency group `tofu-state` shared by every job
+    # that reads or writes state (.github/workflows/tofu.yml). Do not
+    # run local applies while CI might be applying. If Spaces ever
+    # documents conditional-write support, flip this to true.
+    use_lockfile = false
   }
 }

@@ -23,4 +23,9 @@ production_reviewer_user_ids = [722716] # rinat-enikeev
 # gh api orgs/onymchat/teams/<slug> --jq .id
 production_reviewer_team_ids = []
 
+# Flip to true ONLY after onym-discovery's first genesis deploy has
+# created the discovery.onym.app record, and import it in the same
+# breath — see dns.tf and "Who owns discovery.onym.app" in README.md.
+discovery_deployed = false
+
 manage_branch_protection = false

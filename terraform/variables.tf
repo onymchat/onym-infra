@@ -57,6 +57,12 @@ variable "production_reviewer_team_ids" {
   default     = []
 }
 
+variable "discovery_deployed" {
+  description = "Whether discovery.onym.app is live (vhost installed and A record created by onym-discovery's first genesis deploy). Default false: creating the record before that deploy would point clients at a Caddy with no vhost/cert for the name (TLS handshake failure). Flip to true AND import the record (see dns.tf) only after that first deploy."
+  type        = bool
+  default     = false
+}
+
 variable "manage_branch_protection" {
   description = "Off by default: whether this configuration also manages branch protection for main on onym-infra itself. Turn on only once the team wants IaC owning that knob."
   type        = bool

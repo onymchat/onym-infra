@@ -11,12 +11,16 @@
 # NOT imported, because verified absent on 2026-08-14 (they are the
 # only CREATEs the first plan should show):
 #   - digitalocean_firewall.onym_infra        (no firewall attached today)
-#   - cloudflare_dns_record.stack["discovery"] (no A record yet)
 #   - github_repository_environment.production[*] (neither repo has the
 #     environment: `gh api repos/onymchat/<repo>/environments` -> total_count 0.
 #     If one appears before first apply, import it with id
 #     "<repo>:production", e.g.:
 #       tofu import 'github_repository_environment.production["onym-discovery"]' 'onym-discovery:production')
+#
+# NOT created and NOT imported (gated off):
+#   - cloudflare_dns_record.discovery[0] — count = 0 until
+#     var.discovery_deployed is flipped; onym-discovery's first genesis
+#     deploy creates the live record, then it is imported. See dns.tf.
 
 # ─── Droplet ────────────────────────────────────────────────────────────
 # Lookup: doctl compute droplet list onym-infra --format ID --no-header

@@ -23,9 +23,41 @@ here is tested against the `terraform` binary.
 | Managed here | Owner elsewhere |
 |---|---|
 | droplet `onym-infra` (exists, size, region) | on-box state: `deploy.sh` (docker, compose, secrets, manifest) |
-| DO cloud firewall 22/80/443 + 443/udp | on-box `ufw` (cloud-init) stays as-is |
-| A records: nostr, blossom, relayer, moderation, authority, discovery | other zone records (bank, n8n, MX, TXT…) untouched |
+| DO cloud firewall 22/80/443/icmp + 443/udp | on-box `ufw` (cloud-init) stays as-is |
+| A records: nostr, blossom, relayer, moderation, authority | other zone records (bank, n8n, MX, TXT…) untouched |
+| `discovery.onym.app` A record — **only after adoption**, see below | **onym-discovery's deploy creates it** (`ci-deploy.sh`, DNS-last) |
 | `production` environments on onym-discovery + onym-relayer (reviewers) | secret **values** — never IaC, see below |
+
+## Who owns `discovery.onym.app`
+
+Nothing in this repo serves that name: the `Caddyfile` has no
+discovery vhost and `deploy.sh`'s `HOSTS` list stops at the five
+existing names. Creating the A record from here first would point
+clients at a Caddy with no matching site and no certificate — a TLS
+handshake failure, not a 404.
+
+So the record's **lifecycle is owned by onymchat/onym-discovery**: its
+deploy workflow installs the Caddy vhost on this droplet,
+health-checks it, and creates the A record **last**. In this
+configuration the record is gated behind `discovery_deployed`
+(default `false`, so it is a no-op). After the first onym-discovery
+genesis deploy has created the record, adopt it here — flip the
+variable **and** import (commands in `dns.tf`) — and from then on
+OpenTofu is the system of record, exactly as for the other five
+records: onym-discovery's per-deploy upsert writes the same values and
+creates no drift. Do not flip the variable without importing: that
+would try to create a second A record.
+
+## State is NOT locked
+
+The S3-compatible backend has no working lock: OpenTofu 1.10+'s
+`use_lockfile` needs S3 conditional writes, which DigitalOcean Spaces
+does not document supporting, so `backend.tf` sets it to `false`
+explicitly rather than trusting a lock that may silently not hold.
+**The only serialization is the CI concurrency group `tofu-state`**,
+which every state-touching job (PR plan, apply, drift) joins. The
+corollary: never run `tofu apply` (or a state-refreshing plan) locally
+while CI could be applying — check the Actions tab first.
 
 ## The secrets-never-in-state rule
 
@@ -79,9 +111,10 @@ command next to each one if you are bootstrapping much later.
 
    - **6 imports** — the droplet and the 5 existing A records — each
      with **no changes** to the imported resource;
-   - **4 creates**, all verified absent from live infra on 2026-08-14:
-     the DO firewall, the `discovery.onym.app` A record, and the two
-     `production` environments;
+   - **3 creates**, all verified absent from live infra on 2026-08-14:
+     the DO firewall and the two `production` environments (the
+     `discovery.onym.app` record is gated off — see
+     "Who owns discovery.onym.app" above);
    - **zero changed, zero destroyed**.
 
    Anything else means reality moved since the ids were resolved: stop
@@ -90,14 +123,35 @@ command next to each one if you are bootstrapping much later.
    longer byte-matches live (e.g. TTL — deploy.sh writes 120, and
    `dns_ttl` matches it on purpose).
 
-5. **Apply**, then plan again — the second plan must be empty:
+   Know what the two consequential creates DO before applying:
+
+   - **The firewall create is not a no-op.** Attaching a DO cloud
+     firewall default-denies every inbound port not listed. The rules
+     cover 22/80/443 tcp, 443/udp, and inbound ICMP (added
+     deliberately — without it, ping and inbound path-MTU discovery to
+     the box would stop working after apply). Anything else that was
+     implicitly reachable stops being reachable.
+   - **The `production` environments change other repos' deploys.**
+     See the operator checklist below.
+
+   Also note 443/udp opens QUIC only at the cloud layer — on-box ufw
+   still blocks it (`droplet.tf` has the follow-up).
+
+5. **Notify the onym-discovery and onym-relayer owners** before the
+   apply: creating the `production` environments with required
+   reviewers means their workflows (onym-discovery `deploy.yml`,
+   onym-relayer `sign-manifest.yml`) **start blocking on a human
+   approval from the moment this applies**. That gate is the point,
+   but it must not surprise the people whose deploys it stops.
+
+6. **Apply**, then plan again — the second plan must be empty:
 
    ```bash
    tofu apply
    tofu plan   # -> "No changes."
    ```
 
-6. **Wire up CI** (`.github/workflows/tofu.yml`): add repo secrets
+7. **Wire up CI** (`.github/workflows/tofu.yml`): add repo secrets
    `SPACES_ACCESS_KEY_ID`, `SPACES_SECRET_ACCESS_KEY`,
    `TF_GITHUB_TOKEN` (org secrets `DO_API_KEY` / `CF_API_TOKEN` are
    reused as-is), and protect the `production` environment on
@@ -107,8 +161,11 @@ command next to each one if you are bootstrapping much later.
 ## Day 2
 
 - **PRs** touching `terraform/` get fmt-check + validate always, and a
-  full `tofu plan` posted as a PR comment when secrets are available
-  (fork PRs get a validate-only note).
+  full `tofu plan` posted as a PR comment for same-repo PRs only —
+  fork PRs are excluded by explicit condition, both because the plan
+  comment is an infra inventory (droplet IP, zone/record ids) and
+  because the unlocked state must not be touched on behalf of an
+  untrusted head ref.
 - **Applies** happen only from main, and only after a human approves
   the `production` environment gate.
 - **Drift**: every Monday CI runs `tofu plan -detailed-exitcode`; a
