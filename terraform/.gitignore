@@ -1,0 +1,16 @@
+# Provider binaries and module cache — recreated by `tofu init`.
+.terraform/
+
+# Local state must never be committed; real state lives in the Spaces
+# backend (backend.tf).
+*.tfstate
+*.tfstate.*
+
+# Real tfvars may carry operator-specific values; the example is the
+# committed one.
+terraform.tfvars
+
+# Plan files can embed resolved values — never commit them.
+*.tfplan
+tfplan
+plan.txt

@@ -240,6 +240,19 @@ what it just signed) **before**
 — under enforcement, a 404 or a stale signature rejects the manifest
 and blocks consent outright.
 
+## Infrastructure as code (`terraform/`)
+
+The infrastructure *around* the stack — the droplet's existence, size
+and region, its cloud firewall, the Cloudflare A records, and the
+GitHub `production` deployment environments — is described as
+[OpenTofu](https://opentofu.org) configuration in
+[`terraform/`](terraform/), imported from the live resources rather
+than recreated. `deploy.sh` still owns everything *on* the box, and
+the two do not fight. See [`terraform/README.md`](terraform/README.md)
+for the bootstrap runbook, the CI plan/apply/drift workflow
+(`.github/workflows/tofu.yml`), and the rule that secret values never
+enter OpenTofu state.
+
 ## Deploy via GitHub Actions
 
 `.github/workflows/deploy.yml` runs the same `deploy.sh` from CI

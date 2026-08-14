@@ -1,0 +1,252 @@
+name: tofu
+
+# OpenTofu (`tofu`, not `terraform`) CI for terraform/:
+#
+#   pull_request  fmt-check + validate always; a real `tofu plan` when
+#                 the repo's secrets are available (they are not on
+#                 fork PRs), posted as a PR comment. NOTHING is applied.
+#   push to main  plan + apply, gated behind the `production`
+#                 environment — a human approves every apply.
+#   schedule      weekly drift plan; a non-empty diff opens (or
+#                 updates) a "tofu drift" issue.
+#
+# Secrets used (org/repo secrets -> the env names the providers read):
+#   DO_API_KEY               -> DIGITALOCEAN_TOKEN   (same secret deploy.yml uses)
+#   CF_API_TOKEN             -> CLOUDFLARE_API_TOKEN (same secret deploy.yml uses)
+#   TF_GITHUB_TOKEN          -> GITHUB_TOKEN  PAT with admin on
+#                               onym-discovery/onym-relayer/onym-infra;
+#                               the workflow's own GITHUB_TOKEN cannot
+#                               manage environments on OTHER repos
+#   SPACES_ACCESS_KEY_ID     -> AWS_ACCESS_KEY_ID     (state backend, see terraform/backend.tf)
+#   SPACES_SECRET_ACCESS_KEY -> AWS_SECRET_ACCESS_KEY
+#
+# Secret VALUES are never resources here — see terraform/github.tf for
+# the secrets-never-in-state rule.
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/tofu.yml"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/tofu.yml"
+  schedule:
+    # Weekly drift check, Monday 06:20 UTC.
+    - cron: "20 6 * * 1"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: terraform
+
+env:
+  TOFU_VERSION: "1.12.5"
+
+jobs:
+  fmt-and-validate:
+    name: fmt-and-validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+
+      - name: tofu fmt -check
+        run: tofu fmt -check -diff -recursive
+
+      # Backend-less init: validation needs providers, not state, so
+      # this runs with zero credentials — including on fork PRs.
+      - name: tofu init -backend=false
+        run: tofu init -backend=false
+
+      - name: tofu validate
+        run: tofu validate
+
+  plan:
+    name: plan (PR)
+    if: github.event_name == 'pull_request'
+    needs: fmt-and-validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+
+      # Secrets are empty on PRs from forks; detect that instead of
+      # failing init with an opaque credentials error.
+      - name: Check secret availability
+        id: creds
+        env:
+          DO_API_KEY: ${{ secrets.DO_API_KEY }}
+          SPACES_KEY: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+        run: |
+          if [ -n "$DO_API_KEY" ] && [ -n "$SPACES_KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: tofu plan
+        id: plan
+        if: steps.creds.outputs.available == 'true'
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DO_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+        run: |
+          tofu init -input=false
+          tofu plan -input=false -no-color -out=tfplan
+          tofu show -no-color tfplan > plan.txt
+
+      - name: Comment plan on PR
+        if: steps.creds.outputs.available == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync('terraform/plan.txt', 'utf8');
+            const limit = 60000;
+            if (plan.length > limit) {
+              plan = plan.slice(0, limit) + '\n... (truncated; full plan in the workflow log)';
+            }
+            const marker = '<!-- tofu-plan-comment -->';
+            const body = `${marker}\n### \`tofu plan\`\n\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n\n</details>`;
+            const {data: comments} = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, per_page: 100,
+            });
+            const prev = comments.find(c => c.body && c.body.startsWith(marker));
+            if (prev) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: prev.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+      - name: Note validate-only run
+        if: steps.creds.outputs.available != 'true'
+        run: |
+          echo "### tofu: validate-only" >> "$GITHUB_STEP_SUMMARY"
+          echo "Secrets are not available to this PR (fork, or not yet configured)," >> "$GITHUB_STEP_SUMMARY"
+          echo "so no plan was produced. fmt + validate passed in the previous job." >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: apply (main)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: fmt-and-validate
+    runs-on: ubuntu-latest
+    # A human approves every apply: this is the `production` environment
+    # on THIS repo, protected with required reviewers. Like the one
+    # onym-discovery's workflow warns about, it is auto-created
+    # UNPROTECTED on first run — add required reviewers in repo
+    # Settings -> Environments BEFORE the first push to main.
+    environment: production
+    concurrency:
+      group: tofu-state
+      cancel-in-progress: false
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DO_API_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+
+      - name: tofu init
+        run: tofu init -input=false
+
+      - name: tofu plan
+        run: tofu plan -input=false -no-color -out=tfplan
+
+      - name: tofu apply
+        run: tofu apply -input=false -no-color tfplan
+
+  drift:
+    name: drift (weekly)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: tofu-state
+      cancel-in-progress: false
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DO_API_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+
+      - name: tofu plan (drift check)
+        id: plan
+        run: |
+          tofu init -input=false
+          set +e
+          tofu plan -input=false -no-color -detailed-exitcode -out=tfplan
+          code=$?
+          set -e
+          # 0 = clean, 2 = drift, anything else = error.
+          if [ "$code" != 0 ] && [ "$code" != 2 ]; then exit "$code"; fi
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          tofu show -no-color tfplan > plan.txt
+
+      - name: Open or update drift issue
+        if: steps.plan.outputs.exitcode == '2'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync('terraform/plan.txt', 'utf8');
+            const limit = 60000;
+            if (plan.length > limit) {
+              plan = plan.slice(0, limit) + '\n... (truncated; full plan in the workflow log)';
+            }
+            const title = 'tofu drift: live infrastructure differs from terraform/';
+            const body = `The weekly drift plan found differences between the OpenTofu configuration and live infrastructure.\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n\n</details>\n\nEither the live change should be encoded in terraform/, or it was unintended and \`tofu apply\` should revert it.`;
+            const {data: issues} = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', per_page: 100,
+            });
+            const prev = issues.find(i => i.title === title);
+            if (prev) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: prev.number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['infrastructure'],
+              });
+            }

@@ -1,0 +1,26 @@
+# Copy to terraform.tfvars only if you need to override a default —
+# every default in variables.tf already matches the live deployment
+# (verified 2026-08-14), so a first bootstrap needs NO tfvars file.
+#
+# Credentials never go here. They are environment variables only:
+#   export DIGITALOCEAN_TOKEN=...       # DO API token (CI: org secret DO_API_KEY)
+#   export CLOUDFLARE_API_TOKEN=...     # DNS:Edit on onym.app (CI: org secret CF_API_TOKEN)
+#   export GITHUB_TOKEN=...             # PAT: repo admin on onymchat/{onym-discovery,onym-relayer,onym-infra}
+#   export AWS_ACCESS_KEY_ID=...        # Spaces key for the state backend (backend.tf)
+#   export AWS_SECRET_ACCESS_KEY=...    # Spaces secret
+
+droplet_name   = "onym-infra"
+droplet_region = "ams3"
+droplet_size   = "s-1vcpu-2gb"
+droplet_image  = "ubuntu-24-04-x64"
+
+cloudflare_zone_name = "onym.app"
+cloudflare_zone_id   = "ab7846d23674f404cd0ceffa2f41f1f4"
+dns_ttl              = 120
+
+# gh api users/<login> --jq .id
+production_reviewer_user_ids = [722716] # rinat-enikeev
+# gh api orgs/onymchat/teams/<slug> --jq .id
+production_reviewer_team_ids = []
+
+manage_branch_protection = false
