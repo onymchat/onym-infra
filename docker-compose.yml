@@ -95,6 +95,12 @@ services:
     # in relayer.env — never committed. See relayer.env.example.
     env_file: ./relayer.env
     environment:
+      # Not a secret — a fixed path inside the image, where the relayer
+      # Dockerfile bakes the signed operator manifest (manifest-signed/).
+      # Committed here so CI deploys it; `environment:` wins over
+      # env_file, keeping the droplet's relayer.env free of this key.
+      RELAYER_OPERATOR_MANIFEST: /srv/operator-manifest/manifest.json
+    environment:
       # Bind on all interfaces inside the container so Caddy can reach
       # it; the port is NOT published to the host.
       - RELAYER_BIND=0.0.0.0:8080
