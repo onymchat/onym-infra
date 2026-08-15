@@ -116,13 +116,16 @@ command next to each one if you are bootstrapping much later.
 
    The first plan must show **exactly**:
 
-   - **6 imports** — the droplet and the 5 existing A records — each
+   - **9 imports** — the droplet, the 5 pre-existing A records, the
+     discovery record (created by the 2026-08-15 genesis deploy), and
+     the two production environments (created during the same rollout;
+     Tofu reconciles reviewer/branch-policy settings in place) — each
      with **no changes** to the imported resource;
-   - **3 creates**, all verified absent from live infra on 2026-08-14:
-     the DO firewall and the two `production` environments (the
-     `discovery.onym.app` record is gated off — see
-     "Who owns discovery.onym.app" above);
-   - **zero changed, zero destroyed**.
+   - **1 create** — the DO firewall, still verified absent (imports may
+     show settings drift on the environments as in-place *changes*;
+     review those diffs, they are Tofu asserting the gate config);
+   - **zero destroyed** (changes only on the two imported environments
+     if their hand-created settings differ from github.tf).
 
    Anything else means reality moved since the ids were resolved: stop
    and re-run the lookup commands in `imports.tf`, do not apply. An

@@ -17,10 +17,6 @@
 #     "<repo>:production", e.g.:
 #       tofu import 'github_repository_environment.production["onym-discovery"]' 'onym-discovery:production')
 #
-# NOT created and NOT imported (gated off):
-#   - cloudflare_dns_record.discovery[0] — count = 0 until
-#     var.discovery_deployed is flipped; onym-discovery's first genesis
-#     deploy creates the live record, then it is imported. See dns.tf.
 
 # ─── Droplet ────────────────────────────────────────────────────────────
 # Lookup: doctl compute droplet list onym-infra --format ID --no-header
@@ -61,4 +57,28 @@ import {
 import {
   to = cloudflare_dns_record.stack["authority"]
   id = "ab7846d23674f404cd0ceffa2f41f1f4/840300919a161c6427782554b80f4cdf"
+}
+
+# Both production environments now exist (created 2026-08-15 during the
+# first deploy rollout); imported so the settings in github.tf reconcile
+# in place instead of colliding with a create.
+import {
+  to = github_repository_environment.production["onym-discovery"]
+  id = "onym-discovery:production"
+}
+
+import {
+  to = github_repository_environment.production["onym-relayer"]
+  id = "onym-relayer:production"
+}
+
+# discovery.onym.app was created by the onym-discovery genesis deploy on
+# 2026-08-15 (ci-deploy.sh, DNS-last). discovery_deployed now defaults
+# true and the record imports here; ci-deploy.sh remains a co-writer
+# (it upserts on every publish and deletes stray records for the name),
+# so both writers must agree on content — they do: A, droplet IP,
+# DNS-only. See the ownership section in the README.
+import {
+  to = cloudflare_dns_record.discovery[0]
+  id = "ab7846d23674f404cd0ceffa2f41f1f4/465f6bb537de598716d686c5a7f134de"
 }
