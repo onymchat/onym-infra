@@ -90,3 +90,31 @@
 
 	reverse_proxy authority:8080
 }
+
+# Onym Discovery provider — a static, signed directory tree published
+# by the onym-discovery repo's Deploy workflow into /var/www/discovery
+# on this droplet (mounted at /srv/discovery below in compose). This
+# stack owns only the vhost; the artifacts (manifest.json, chained
+# catalog snapshots, seat manifests, policy/privacy documents) are
+# signed, verified and rsynced by that workflow — see README "The
+# discovery static seat". An empty web root is a valid degraded state:
+# the vhost answers 404s (and still gets its certificate) until the
+# first discovery publish lands.
+#
+# Static files only; the signed JSON must go out byte-for-byte (encode
+# is transfer compression, not re-serialization). .sig files are
+# detached Ed25519 signatures — text/plain, matching how the
+# authority's manifest.json.sig is served above. The policy and privacy
+# documents go out as the Markdown that was signed off, verbatim, for
+# the same reason the authority's terms do: without the header Caddy
+# hands the browser application/octet-stream and it downloads instead
+# of showing them.
+{$DISCOVERY_HOST} {
+	encode zstd gzip
+	root * /srv/discovery
+	@sig path *.sig
+	header @sig Content-Type "text/plain; charset=utf-8"
+	@md path *.md
+	header @md Content-Type "text/markdown; charset=utf-8"
+	file_server
+}

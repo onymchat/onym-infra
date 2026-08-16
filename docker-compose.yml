@@ -43,6 +43,7 @@ services:
       - MODERATION_HOST=${MODERATION_HOST:-moderation.onym.app}
       - MODERATION_ANDROID_HOST=${MODERATION_ANDROID_HOST:-moderation-android.onym.app}
       - AUTHORITY_HOST=${AUTHORITY_HOST:-authority.onym.app}
+      - DISCOVERY_HOST=${DISCOVERY_HOST:-discovery.onym.app}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # The authority's published policy documents, served under
@@ -57,6 +58,14 @@ services:
       # (clients verify the manifest's exact bytes against the
       # directory-pinned operator key before trusting the terms).
       - ./runtime/authority-manifest:/srv/authority-manifest:ro
+      # The Onym Discovery provider's static tree. Deliberately OUTSIDE
+      # /opt/onym-infra: the artifacts are published by the
+      # onym-discovery repo's Deploy workflow (signed + verified there,
+      # rsynced to /var/www/discovery), and this repo's own rsync
+      # --delete must never sweep them away. deploy.sh creates the
+      # directory, so the vhost serves clean 404s (a valid degraded
+      # state) until the first discovery publish lands.
+      - /var/www/discovery:/srv/discovery:ro
       # Persists issued certificates + ACME account across restarts.
       # Losing this volume just means Caddy re-issues on next boot.
       - caddy-data:/data

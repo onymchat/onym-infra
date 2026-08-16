@@ -49,6 +49,11 @@ name: Deploy
 #   DOMAIN, NOSTR_HOST, BLOSSOM_HOST, RELAYER_HOST, CADDY_EMAIL,
 #   DO_REGION, DO_DROPLET_SIZE
 #   MODERATION_HOST, AUTHORITY_HOST
+#   DISCOVERY_HOST      Default discovery.onym.app — the static Onym
+#                       Discovery seat. This stack serves only the
+#                       vhost; the signed artifacts under
+#                       /var/www/discovery are published by the
+#                       onym-discovery repo's Deploy workflow
 #   DOCR_NAME           DigitalOcean container registry to build into and
 #                       pull from. Set it and the runner builds the four
 #                       images (skipping any whose submodule commit is
@@ -161,6 +166,7 @@ jobs:
           MODERATION_HOST=${{ vars.MODERATION_HOST || 'moderation.onym.app' }}
           MODERATION_ANDROID_HOST=${{ vars.MODERATION_ANDROID_HOST || 'moderation-android.onym.app' }}
           AUTHORITY_HOST=${{ vars.AUTHORITY_HOST || 'authority.onym.app' }}
+          DISCOVERY_HOST=${{ vars.DISCOVERY_HOST || 'discovery.onym.app' }}
           MODERATION_DEVICECHECK_ENV=${{ vars.MODERATION_DEVICECHECK_ENV || 'production' }}
           MODERATION_ENFORCE_SIGNATURES=${{ vars.MODERATION_ENFORCE_SIGNATURES || 'true' }}
           MODERATION_INTERFACE_KEY_EPOCHS=${{ vars.MODERATION_INTERFACE_KEY_EPOCHS }}
