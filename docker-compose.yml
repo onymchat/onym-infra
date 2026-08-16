@@ -1,7 +1,7 @@
 name: onym-infra
 
 # Consolidated onym.app backend: Nostr relay (strfry), Blossom media
-# server, the Soroban contract relayer, and the two moderation services
+# server, the Soroban contract relayer, and the three moderation services
 # — all behind Caddy, which terminates TLS and provisions/renews Let's
 # Encrypt certificates automatically (no certbot sidecar, no cron, no
 # manual renewal).
@@ -11,7 +11,7 @@ name: onym-infra
 # compose name over the private `internal` network; only Caddy
 # publishes ports to the host.
 #
-# The two moderation services are folded in from onym-moderation, whose
+# The moderation services are folded in from onym-moderation, whose
 # repository ships each of them as a standalone stack with its own
 # Caddy. Those Caddies, their published ports and their private
 # networks are all dropped here in favour of this one; the services
@@ -41,6 +41,7 @@ services:
       - BLOSSOM_HOST=${BLOSSOM_HOST:-blossom.onym.app}
       - RELAYER_HOST=${RELAYER_HOST:-relayer.onym.app}
       - MODERATION_HOST=${MODERATION_HOST:-moderation.onym.app}
+      - MODERATION_ANDROID_HOST=${MODERATION_ANDROID_HOST:-moderation-android.onym.app}
       - AUTHORITY_HOST=${AUTHORITY_HOST:-authority.onym.app}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
@@ -61,7 +62,7 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     networks: [internal]
-    depends_on: [nostr-relay, blossom, relayer, moderation, authority]
+    depends_on: [nostr-relay, blossom, relayer, moderation, moderation-android, authority]
 
   nostr-relay:
     image: dockurr/strfry:latest
@@ -148,6 +149,53 @@ services:
       - moderation-data:/data
     networks: [internal]
 
+  # The Android enforcement backend — the interface for
+  # onym:component:onym-android, speaking Google Play Integrity device
+  # recall where its sibling above speaks Apple DeviceCheck. A separate
+  # service on purpose: the two agree on bytes, not on code (each is
+  # its own crate in the submodule), hold different platform
+  # credentials, and countersign under different component ids. It
+  # holds the linked Cloud project's service-account key — the only
+  # write path to any device's recall values — so it too stays on the
+  # private network with no published port.
+  moderation-android:
+    image: ${MODERATION_ANDROID_IMAGE:-onym-infra-moderation-android:local}
+    build:
+      context: ./moderation/android
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Secrets (the Google service-account JSON, the interface signing
+    # seed, the token the authority presents) live in
+    # moderation-android.env — never committed. See
+    # moderation-android.env.example.
+    env_file: ./moderation-android.env
+    environment:
+      - MODERATION_BIND=0.0.0.0:8080
+      - MODERATION_STORE_PATH=/data/moderation.sqlite
+      # The crate defaults to onym:component:onym-android; stated
+      # explicitly so the two interfaces' component ids sit side by
+      # side in one file.
+      - MODERATION_INTERFACE_COMPONENT_ID=${MODERATION_ANDROID_INTERFACE_COMPONENT_ID:-onym:component:onym-android}
+      # Which app + signing certificate a decoded integrity token must
+      # name (classifier conditions 1–2). Not secrets: the package name
+      # is public and the digest is of a public certificate. The
+      # package default matches the workflow's so local and CI deploys
+      # boot the same classifier.
+      - MODERATION_PLAY_PACKAGE_NAME=${MODERATION_PLAY_PACKAGE_NAME:-app.onym.android}
+      - MODERATION_PLAY_CERT_SHA256_DIGESTS=${MODERATION_PLAY_CERT_SHA256_DIGESTS:-}
+      - MODERATION_INTERFACE_KEY_EPOCHS=${MODERATION_ANDROID_INTERFACE_KEY_EPOCHS:-}
+      - MODERATION_ENFORCE_SIGNATURES=${MODERATION_ENFORCE_SIGNATURES:?set MODERATION_ENFORCE_SIGNATURES in .env (normally true)}
+      - MODERATION_ALLOW_UNAUTHENTICATED_AUTHORITY=${MODERATION_ALLOW_UNAUTHENTICATED_AUTHORITY:-false}
+      - MODERATION_SESSION_MAX_SKEW_SECS=${MODERATION_SESSION_MAX_SKEW_SECS:-300}
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      # The verdict record and the write log. Losing this volume loses
+      # the meaning behind every recall value Google is holding — the
+      # values alone cannot be reconstructed into verdicts — so back
+      # it up alongside moderation-data.
+      - moderation-android-data:/data
+    networks: [internal]
+
   # The moderation authority. It opens cases, decides them, and signs
   # verdicts; it has no Apple credentials and no way to mark a device
   # itself. That separation is the point, so resist giving this service
@@ -196,6 +244,17 @@ services:
       # and cannot be known until the interface has booted once and
       # logged it, so this is empty on a first deploy and set after.
       - AUTHORITY_INTERFACE_KEY=${AUTHORITY_INTERFACE_KEY:-}
+      # Per-interface countersigning keys, <componentId>=<onym:key:hex>
+      # comma separated. With two interface backends the flat
+      # AUTHORITY_INTERFACE_KEY union would let one backend's key
+      # witness mandates naming the other; a listed component is
+      # verified against exactly its own keys. Like
+      # AUTHORITY_INTERFACE_KEY, the Android entry cannot exist until
+      # that interface has booted once — empty on a first deploy, set
+      # from its /health afterwards. (The delivery ROUTE for the
+      # Android interface carries a bearer token and therefore lives
+      # in authority.env, not here.)
+      - AUTHORITY_INTERFACE_KEYS_BY_COMPONENT=${AUTHORITY_INTERFACE_KEYS_BY_COMPONENT:-}
       - AUTHORITY_DEADLINE_SWEEP_SECS=${AUTHORITY_DEADLINE_SWEEP_SECS:-300}
       # Automated triage is off here. Turning it on means adding a
       # model container to this stack — the authority deliberately
@@ -223,6 +282,7 @@ services:
     networks: [internal]
 
 volumes:
+  moderation-android-data:
   caddy-data:
   caddy-config:
   strfry-data:

@@ -1,7 +1,7 @@
 name: Deploy
 
 # Deploys the consolidated onym.app stack (Caddy + strfry + blossom +
-# relayer + the two moderation services) to DigitalOcean by running
+# relayer + the three moderation services) to DigitalOcean by running
 # deploy/digitalocean/deploy.sh with config sourced from repo
 # Secrets/Variables instead of a local .env.
 # Manual trigger only — infra changes should be deliberate.
@@ -28,15 +28,32 @@ name: Deploy
 #                                    human decision and appeal panel at /admin
 #   MODERATION_AUDIT_TOKEN           (optional) bearer token for GET /v1/write-log
 #
+# Android moderation SECRETS (the Play Integrity sibling — a separate
+# interface with its own credentials; see moderation-android.env.example):
+#   MODERATION_PLAY_SA_KEY_JSON      Google Cloud service-account JSON key of the
+#                                    project linked in Play Console, one line.
+#                                    Empty is valid: the service boots degraded and
+#                                    every gate check answers checkRequired — the
+#                                    expected state until device-recall access lands
+#   MODERATION_ANDROID_INTERFACE_SIGNING_SEED  64 hex chars, DIFFERENT from the
+#                                    Apple interface's seed (deploy.sh enforces it)
+#   MODERATION_ANDROID_AUTHORITY_TOKEN  REQUIRED (the job fails without it): bearer
+#                                    token the authority presents on the Android
+#                                    backend's POST /v1/verdicts. Written into the
+#                                    authority's AUTHORITY_INTERFACE_ROUTES entry —
+#                                    one secret, two files, same pattern as
+#                                    MODERATION_AUTHORITY_TOKEN
+#   MODERATION_ANDROID_AUDIT_TOKEN   (optional) bearer for its GET /v1/write-log
+#
 # Repository VARIABLES (optional — defaults shown in the workflow):
 #   DOMAIN, NOSTR_HOST, BLOSSOM_HOST, RELAYER_HOST, CADDY_EMAIL,
 #   DO_REGION, DO_DROPLET_SIZE
 #   MODERATION_HOST, AUTHORITY_HOST
 #   DOCR_NAME           DigitalOcean container registry to build into and
-#                       pull from. Set it and the runner builds the three
+#                       pull from. Set it and the runner builds the four
 #                       images (skipping any whose submodule commit is
 #                       already built) and the droplet only pulls. Empty
-#                       keeps the old behaviour: sources rsynced and three
+#                       keeps the old behaviour: sources rsynced and four
 #                       Rust builds run on the droplet itself. Uses
 #                       DO_API_KEY — no additional secret
 #   MODERATION_DEVICECHECK_ENV       production | development
@@ -56,6 +73,20 @@ name: Deploy
 #                                    empty on the first deploy, read
 #                                    `interfaceKey` from its `/health`, set it,
 #                                    and re-run
+#   MODERATION_ANDROID_HOST          Default moderation-android.onym.app
+#   MODERATION_PLAY_PACKAGE_NAME     app.onym.android — the package a decoded
+#                                    integrity token must name
+#   MODERATION_PLAY_CERT_SHA256_DIGESTS  Play App Signing cert SHA-256 digest(s),
+#                                    base64url-nopad (Google's token spelling, NOT
+#                                    the console's colon-hex), comma separated
+#   MODERATION_ANDROID_INTERFACE_KEY_EPOCHS  Same shape as
+#                                    MODERATION_INTERFACE_KEY_EPOCHS, for the
+#                                    Android interface
+#   AUTHORITY_INTERFACE_KEYS_BY_COMPONENT  onym:component:onym-android=<onym:key:hex>.
+#                                    Like AUTHORITY_INTERFACE_KEY it cannot exist
+#                                    until the Android interface has booted once:
+#                                    leave empty on the first deploy, read
+#                                    `interfaceKey` from its /health, set it, re-run
 #   DROPLET_ID          set this after the first run (printed in the job
 #                       summary) so subsequent runs reuse the same box
 
@@ -109,6 +140,10 @@ jobs:
           MODERATION_DEVICECHECK_TEAM_ID: ${{ secrets.MODERATION_DEVICECHECK_TEAM_ID }}
           MODERATION_INTERFACE_SIGNING_SEED: ${{ secrets.MODERATION_INTERFACE_SIGNING_SEED }}
           MODERATION_AUDIT_TOKEN: ${{ secrets.MODERATION_AUDIT_TOKEN }}
+          MODERATION_PLAY_SA_KEY_JSON: ${{ secrets.MODERATION_PLAY_SA_KEY_JSON }}
+          MODERATION_ANDROID_INTERFACE_SIGNING_SEED: ${{ secrets.MODERATION_ANDROID_INTERFACE_SIGNING_SEED }}
+          MODERATION_ANDROID_AUTHORITY_TOKEN: ${{ secrets.MODERATION_ANDROID_AUTHORITY_TOKEN }}
+          MODERATION_ANDROID_AUDIT_TOKEN: ${{ secrets.MODERATION_ANDROID_AUDIT_TOKEN }}
           # One secret, written into both files: the token the authority
           # presents to the interface is the token the interface expects.
           MODERATION_AUTHORITY_TOKEN: ${{ secrets.MODERATION_AUTHORITY_TOKEN }}
@@ -124,11 +159,16 @@ jobs:
           BLOSSOM_HOST=${{ vars.BLOSSOM_HOST || 'blossom.onym.app' }}
           RELAYER_HOST=${{ vars.RELAYER_HOST || 'relayer.onym.app' }}
           MODERATION_HOST=${{ vars.MODERATION_HOST || 'moderation.onym.app' }}
+          MODERATION_ANDROID_HOST=${{ vars.MODERATION_ANDROID_HOST || 'moderation-android.onym.app' }}
           AUTHORITY_HOST=${{ vars.AUTHORITY_HOST || 'authority.onym.app' }}
           MODERATION_DEVICECHECK_ENV=${{ vars.MODERATION_DEVICECHECK_ENV || 'production' }}
           MODERATION_ENFORCE_SIGNATURES=${{ vars.MODERATION_ENFORCE_SIGNATURES || 'true' }}
           MODERATION_INTERFACE_KEY_EPOCHS=${{ vars.MODERATION_INTERFACE_KEY_EPOCHS }}
+          MODERATION_ANDROID_INTERFACE_KEY_EPOCHS=${{ vars.MODERATION_ANDROID_INTERFACE_KEY_EPOCHS }}
+          MODERATION_PLAY_PACKAGE_NAME=${{ vars.MODERATION_PLAY_PACKAGE_NAME || 'app.onym.android' }}
+          MODERATION_PLAY_CERT_SHA256_DIGESTS=${{ vars.MODERATION_PLAY_CERT_SHA256_DIGESTS }}
           AUTHORITY_INTERFACE_KEY=${{ vars.AUTHORITY_INTERFACE_KEY }}
+          AUTHORITY_INTERFACE_KEYS_BY_COMPONENT=${{ vars.AUTHORITY_INTERFACE_KEYS_BY_COMPONENT }}
           AUTHORITY_TRIAGE_MODE=off
           AUTHORITY_QA_ALLOW_EARLY_BAN=true
           CADDY_EMAIL=${{ vars.CADDY_EMAIL || 'rinat@qda.one' }}
@@ -159,14 +199,42 @@ jobs:
           MODERATION_AUDIT_TOKEN=$MODERATION_AUDIT_TOKEN
           EOF
 
+          # An unset Android authority token would deploy green with a
+          # dead verdict path: the backend's /v1/verdicts refuses
+          # everything, and the routes line below would carry an empty
+          # bearer. Fail here instead.
+          if [ -z "$MODERATION_ANDROID_AUTHORITY_TOKEN" ]; then
+            echo "::error::MODERATION_ANDROID_AUTHORITY_TOKEN secret is not set — Android verdict delivery would be dead. Set it (openssl rand -hex 32) and re-run."
+            exit 1
+          fi
+          # The SA key line is written only when the secret is set: a
+          # PRESENT-but-empty MODERATION_PLAY_SA_KEY_JSON is parsed
+          # (and fails) by the service, while an ABSENT one is the
+          # supported degraded mode — every gate check answers
+          # checkRequired until Google grants device-recall access.
+          cat > moderation-android.env <<EOF
+          MODERATION_INTERFACE_SIGNING_SEED=$MODERATION_ANDROID_INTERFACE_SIGNING_SEED
+          MODERATION_AUTHORITY_TOKEN=$MODERATION_ANDROID_AUTHORITY_TOKEN
+          MODERATION_AUDIT_TOKEN=$MODERATION_ANDROID_AUDIT_TOKEN
+          EOF
+          if [ -n "$MODERATION_PLAY_SA_KEY_JSON" ]; then
+            printf 'MODERATION_PLAY_SA_KEY_JSON=%s\n' "$MODERATION_PLAY_SA_KEY_JSON" >> moderation-android.env
+          fi
+
           # AUTHORITY_INTERFACE_TOKEN is deliberately the same secret as
           # the interface's MODERATION_AUTHORITY_TOKEN above — it is one
           # shared token seen from two sides, and two independently
           # rotated values would just be a delivery outage waiting to
           # happen.
+          # The Android delivery route carries a bearer token, so the
+          # whole ROUTES line is a secret and lives here rather than in
+          # the droplet's compose .env. Verdicts for mandates naming
+          # onym:component:onym-android are delivered to the Android
+          # backend; every other interface keeps the default route.
           cat > authority.env <<EOF
           AUTHORITY_SIGNING_SEED=$AUTHORITY_SIGNING_SEED
           AUTHORITY_INTERFACE_TOKEN=$MODERATION_AUTHORITY_TOKEN
+          AUTHORITY_INTERFACE_ROUTES=onym:component:onym-android=https://${{ vars.MODERATION_ANDROID_HOST || 'moderation-android.onym.app' }}|$MODERATION_ANDROID_AUTHORITY_TOKEN
           AUTHORITY_MODERATOR_TOKEN=$AUTHORITY_MODERATOR_TOKEN
           AUTHORITY_ADMIN_TOKEN=$AUTHORITY_ADMIN_TOKEN
           EOF

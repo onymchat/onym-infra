@@ -41,6 +41,13 @@
 	reverse_proxy moderation:8080
 }
 
+# Android moderation enforcement backend. Same posture as its Apple
+# sibling above: plain JSON, the service's own 256 KiB body cap wins.
+{$MODERATION_ANDROID_HOST} {
+	encode zstd gzip
+	reverse_proxy moderation-android:8080
+}
+
 # Moderation authority. It caps request bodies at 1 MiB itself (the
 # interface above uses 256 KiB). `/manifest.json` is deliberately
 # public: people have to be able to read the classes, terms and appeal

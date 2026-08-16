@@ -2,6 +2,7 @@
 .env
 relayer.env
 moderation.env
+moderation-android.env
 authority.env
 
 # Deployment-generated public artifacts. The authority manifest is
@@ -14,3 +15,13 @@ runtime/
 # Local noise
 *.log
 .DS_Store
+
+# Claude Code session state (worktrees contain embedded git repos).
+.claude/
+
+# Terraform/OpenTofu local state — provider binaries are hundreds of
+# MB (they broke a push once) and state can embed credentials.
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/crash.log

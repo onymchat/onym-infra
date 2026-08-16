@@ -259,18 +259,35 @@ Configure once under **Settings → Secrets and variables → Actions**:
   `AUTHORITY_SIGNING_SEED`, `MODERATION_AUTHORITY_TOKEN` (the same value
   serves as the authority's `AUTHORITY_INTERFACE_TOKEN`),
   `AUTHORITY_ADMIN_TOKEN`, and optionally `AUTHORITY_MODERATOR_TOKEN`
-  and `MODERATION_AUDIT_TOKEN`.
+  and `MODERATION_AUDIT_TOKEN`. For the Android interface:
+  `MODERATION_ANDROID_INTERFACE_SIGNING_SEED` (a DIFFERENT seed from
+  the Apple one), `MODERATION_ANDROID_AUTHORITY_TOKEN` (written into
+  the authority's `AUTHORITY_INTERFACE_ROUTES` — one secret, two
+  files), and optionally `MODERATION_PLAY_SA_KEY_JSON` (absent =
+  degraded checkRequired until Google grants device-recall access)
+  and `MODERATION_ANDROID_AUDIT_TOKEN`.
 - **Variables** (all optional; defaults in the workflow):
   `DOMAIN`, `NOSTR_HOST`, `BLOSSOM_HOST`, `RELAYER_HOST`,
-  `MODERATION_HOST`, `AUTHORITY_HOST`, `MODERATION_DEVICECHECK_ENV`,
-  `MODERATION_ENFORCE_SIGNATURES`, `AUTHORITY_INTERFACE_KEY`,
-  `MODERATION_INTERFACE_KEY_EPOCHS`, `CADDY_EMAIL`, `DO_REGION`,
-  `DO_DROPLET_SIZE`, and `DROPLET_ID`.
+  `MODERATION_HOST`, `MODERATION_ANDROID_HOST`, `AUTHORITY_HOST`,
+  `MODERATION_DEVICECHECK_ENV`, `MODERATION_ENFORCE_SIGNATURES`,
+  `AUTHORITY_INTERFACE_KEY`, `AUTHORITY_INTERFACE_KEYS_BY_COMPONENT`,
+  `MODERATION_INTERFACE_KEY_EPOCHS`,
+  `MODERATION_ANDROID_INTERFACE_KEY_EPOCHS`,
+  `MODERATION_PLAY_PACKAGE_NAME`,
+  `MODERATION_PLAY_CERT_SHA256_DIGESTS` (base64url-nopad, Google's
+  token spelling — not the console's colon-hex), `CADDY_EMAIL`,
+  `DO_REGION`, `DO_DROPLET_SIZE`, and `DROPLET_ID`.
 
 `AUTHORITY_INTERFACE_KEY` is a variable and not a secret because it is
 a *public* key, and because it does not exist until the interface has
 booted once. Read `interfaceKey` from the interface's `/health` —
-see the two-pass first deploy above.
+see the two-pass first deploy above. The Android interface has the
+same two-pass shape through
+`AUTHORITY_INTERFACE_KEYS_BY_COMPONENT=onym:component:onym-android=<key>`,
+read from `https://<MODERATION_ANDROID_HOST>/health` — and it is
+scoped per component on purpose: with two interface backends, a flat
+key union would let one backend's key witness mandates naming the
+other.
 
 ## Rotating an authority's countersigning key
 
