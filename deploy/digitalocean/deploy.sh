@@ -115,6 +115,7 @@ grep -qE '^AUTHORITY_INTERFACE_ROUTES=.*onym:component:onym-android=https://[^|,
 : "${MODERATION_HOST:?set MODERATION_HOST in .env}"
 : "${MODERATION_ANDROID_HOST:?set MODERATION_ANDROID_HOST in .env}"
 : "${AUTHORITY_HOST:?set AUTHORITY_HOST in .env}"
+: "${DISCOVERY_HOST:?set DISCOVERY_HOST in .env}"
 : "${MODERATION_ENFORCE_SIGNATURES:?set MODERATION_ENFORCE_SIGNATURES in .env (normally true)}"
 : "${CADDY_EMAIL:?set CADDY_EMAIL in .env}"
 [[ "$AUTHORITY_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
@@ -130,7 +131,7 @@ SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 SSH_KEY_PATH="${SSH_KEY_PATH/#\~/$HOME}"
 # This array drives both the Cloudflare A records and the post-deploy
 # health checks, so a host that is missing here silently gets neither.
-HOSTS=("$NOSTR_HOST" "$BLOSSOM_HOST" "$RELAYER_HOST" "$MODERATION_HOST" "$MODERATION_ANDROID_HOST" "$AUTHORITY_HOST")
+HOSTS=("$NOSTR_HOST" "$BLOSSOM_HOST" "$RELAYER_HOST" "$MODERATION_HOST" "$MODERATION_ANDROID_HOST" "$AUTHORITY_HOST" "$DISCOVERY_HOST")
 
 save_env() {
     # Rewrite only the droplet identity this run resolved, preserving
@@ -405,6 +406,7 @@ RELAYER_HOST=$RELAYER_HOST
 MODERATION_HOST=$MODERATION_HOST
 MODERATION_ANDROID_HOST=$MODERATION_ANDROID_HOST
 AUTHORITY_HOST=$AUTHORITY_HOST
+DISCOVERY_HOST=$DISCOVERY_HOST
 MODERATION_DEVICECHECK_ENV=${MODERATION_DEVICECHECK_ENV:-production}
 MODERATION_ENFORCE_SIGNATURES=$MODERATION_ENFORCE_SIGNATURES
 MODERATION_INTERFACE_KEY_EPOCHS=${MODERATION_INTERFACE_KEY_EPOCHS:-}
@@ -431,6 +433,14 @@ scp "${SSH_OPTS[@]}" "$MODERATION_ANDROID_ENV" "root@$DROPLET_IP:/opt/onym-infra
 scp "${SSH_OPTS[@]}" "$AUTHORITY_ENV" "root@$DROPLET_IP:/opt/onym-infra/authority.env" >/dev/null
 
 ssh_do "mkdir -p /opt/onym-infra/runtime/authority-manifest"
+
+# The discovery web root lives OUTSIDE /opt/onym-infra on purpose: its
+# contents are published by the onym-discovery repo's Deploy workflow,
+# and the rsync --delete above must never sweep a published, signed
+# chain away. Created here so Caddy's bind mount serves clean 404s (a
+# valid degraded state) rather than depending on Docker to invent the
+# directory. Nothing in this repo ever writes INTO it.
+ssh_do "mkdir -p /var/www/discovery"
 
 NO_BUILD=""
 if [ -n "$DOCR_NAME" ]; then
@@ -564,6 +574,12 @@ HEALTH_FAILURES=0
 check "https://$RELAYER_HOST/" "relayer"   # expect 401/422 (auth/validation) = up
 check "https://$BLOSSOM_HOST/" "blossom"
 check "https://$NOSTR_HOST/"   "nostr"     # expect 400/426 on plain GET = up
+# check(), not check_health(): before the first onym-discovery publish
+# the web root is empty and 404 is the CORRECT answer — what this
+# proves is that the vhost loaded and TLS was issued. Once a publish
+# has landed, the onym-discovery workflow's own health gate checks the
+# served bytes byte-for-byte; this stack only owes the vhost.
+check "https://$DISCOVERY_HOST/manifest.json" "discovery"
 check_health "https://$MODERATION_HOST/health" "moderation" "Check: docker compose logs moderation"
 check_health "https://$MODERATION_ANDROID_HOST/health" "moderation-android" "Check: docker compose logs moderation-android"
 check_health "https://$AUTHORITY_HOST/health"  "authority"  "Check: docker compose logs authority"
@@ -643,6 +659,7 @@ echo "  Relayer:    https://$RELAYER_HOST"
 echo "  Moderation: https://$MODERATION_HOST"
 echo "  Moderation (Android): https://$MODERATION_ANDROID_HOST"
 echo "  Authority:  https://$AUTHORITY_HOST"
+echo "  Discovery:  https://$DISCOVERY_HOST (static; published by onym-discovery's Deploy workflow)"
 echo "  Logs:       ssh -i $SSH_KEY_PATH root@$DROPLET_IP 'cd /opt/onym-infra && docker compose logs -f'"
 # The authority cannot verify a mandate's countersignature until it
 # knows the interface's public key, and that key only exists once the

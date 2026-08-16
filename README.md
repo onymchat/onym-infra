@@ -11,6 +11,7 @@ via Docker Compose:
 | **relayer** | `relayer.onym.app` | Soroban contract relayer (git submodule → [`onym-relayer`](https://github.com/onymchat/onym-relayer)) |
 | **moderation** | `moderation.onym.app` | moderation enforcement backend — holds the Apple DeviceCheck key and is the only thing that can mark a device (git submodule → [`onym-moderation`](https://github.com/onymchat/onym-moderation), `apple/`) |
 | **authority** | `authority.onym.app` | moderation authority — opens and decides cases and signs verdicts, with no Apple credentials and no way to mark a device itself (same submodule, `authority/`) |
+| *(static)* | `discovery.onym.app` | Onym Discovery provider — a signed static tree under `/var/www/discovery`, served by Caddy's `file_server`. No container; the artifacts are published by [`onym-discovery`](https://github.com/onymchat/onym-discovery)'s Deploy workflow (see [The discovery static seat](#the-discovery-static-seat)) |
 
 The two moderation services are one seat split in half on purpose: the
 authority can judge but not enforce, the interface can enforce but not
@@ -253,6 +254,50 @@ what it just signed) **before**
 — under enforcement, a 404 or a stale signature rejects the manifest
 and blocks consent outright.
 
+## The discovery static seat
+
+`https://$DISCOVERY_HOST/` (default `discovery.onym.app`) is a static,
+signed directory tree — the Onym Discovery provider: `manifest.json`
+(+ detached `.sig`), the chain-linked catalog snapshots under
+`catalogs/`, the courier/blossom seat manifests under `manifests/`,
+and the policy/privacy documents. Two repos compose to serve it, with
+a deliberate split:
+
+- **This repo owns the vhost only**: the `{$DISCOVERY_HOST}` block in
+  the `Caddyfile`, the `/var/www/discovery:/srv/discovery:ro` mount in
+  `docker-compose.yml`, the Cloudflare A record (via the `HOSTS`
+  array), and the `mkdir -p /var/www/discovery` in `deploy.sh`.
+  Nothing here ever writes *into* the web root, and the root lives
+  outside `/opt/onym-infra` so this repo's rsync `--delete` can never
+  sweep a published, signed chain away.
+- **[`onym-discovery`](https://github.com/onymchat/onym-discovery)
+  owns the artifacts**: its Deploy workflow
+  (`deploy/onym/ci-assemble.sh` + `ci-deploy.sh`) signs, chains the
+  snapshot onto the previously *published* bytes, verifies everything
+  exactly as a client would, and rsyncs the tree to
+  `/var/www/discovery` on this droplet (never with `--delete` —
+  retention siblings stay live until they expire).
+
+An **empty web root is a valid degraded state**: this stack deploys
+green, the vhost gets its certificate, and every path answers 404
+until the first discovery publish lands. Neither deploy depends on the
+other's ordering — the discovery workflow carries a stopgap
+(`ensure-caddy-vhost.sh`) that installed the vhost via a compose
+override before this repo grew the native block above; it detects the
+native `{$DISCOVERY_HOST}` site block and steps aside, so it is now a
+no-op that simply verifies the vhost exists.
+
+**Coupling to the authority manifest.** The discovery snapshot pins
+the sha256 of the exact `https://$AUTHORITY_HOST/manifest.json` bytes
+that were reviewed (committed as `deploy/onym/reviewed/onym-authority.json`
+in onym-discovery). Any deploy from this repo that changes those bytes
+— a manifest edit, the materializer adding fields, an operator-key
+change — breaks that pin for clients until onym-discovery re-fetches,
+re-reviews, commits the new bytes, and **publishes a new snapshot
+sequence**. The same holds for `relayer.onym.app/manifest.json`. After
+such a deploy, run the onym-discovery publish runbook (its README:
+"Each publish").
+
 ## Deploy via GitHub Actions
 
 `.github/workflows/deploy.yml` runs the same `deploy.sh` from CI
@@ -282,6 +327,7 @@ Configure once under **Settings → Secrets and variables → Actions**:
 - **Variables** (all optional; defaults in the workflow):
   `DOMAIN`, `NOSTR_HOST`, `BLOSSOM_HOST`, `RELAYER_HOST`,
   `MODERATION_HOST`, `MODERATION_ANDROID_HOST`, `AUTHORITY_HOST`,
+  `DISCOVERY_HOST`,
   `MODERATION_DEVICECHECK_ENV`, `MODERATION_ENFORCE_SIGNATURES`,
   `AUTHORITY_INTERFACE_KEY`, `AUTHORITY_INTERFACE_KEYS_BY_COMPONENT`,
   `MODERATION_INTERFACE_KEY_EPOCHS`,
