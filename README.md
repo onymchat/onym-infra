@@ -219,14 +219,27 @@ trusting the terms inside; while it 404s they can only accept the
 manifest soft-verified.
 
 `deploy.sh` produces it on every deploy: the manifest is materialized
-to a staging name, signed **inside the authority image** (the seed
-never leaves `authority.env`, same as `derive-operator-key`), and only
-then is the live pair touched — old signature retired, new manifest
-moved into place, new signature written last. A signing failure leaves
-the previous manifest+signature pair fully intact; any later
-interruption degrades to a missing signature (404 → soft-verify). At
-no instant can the published signature cover different bytes than the
-published manifest.
+to a staging name, finalized, signed **inside the authority image**
+(the seed never leaves `authority.env`, same as
+`derive-operator-key`), and only then is the live pair touched — old
+signature retired, new manifest moved into place, new signature
+written last. A finalize or signing failure leaves the previous
+manifest+signature pair fully intact; any later interruption degrades
+to a missing signature (404 → soft-verify). At no instant can the
+published signature cover different bytes than the published manifest.
+
+The finalize step (`finalize-manifest`, same image, same seed) is what
+makes the manifest pass the clients' **discovery-seat
+destination-manifest review**: it injects the top-level `name`
+(`AUTHORITY_MANIFEST_NAME`, default "Onym Authority") and `endpoints`
+(from `AUTHORITY_PUBLIC_URL`, derived from `AUTHORITY_HOST` in
+compose) that the catalog adapters read, and embeds a second,
+**embedded** `signature` — the same operator key over the discovery
+profile's canonical signing bytes (the document minus `signature`,
+compact, keys sorted). The detached `.sig` above still covers the
+final file's exact bytes, embedded signature included, which is why
+finalizing happens first. Both knobs have defaults; no new secret or
+required variable.
 
 Wire contract, pinned here because two repos depend on it: the body is
 **base64 of the 64-byte raw signature, plus a trailing LF** — 89 bytes

@@ -416,6 +416,7 @@ AUTHORITY_INTERFACE_KEY=${AUTHORITY_INTERFACE_KEY:-}
 AUTHORITY_INTERFACE_KEYS_BY_COMPONENT=${AUTHORITY_INTERFACE_KEYS_BY_COMPONENT:-}
 AUTHORITY_TRIAGE_MODE=${AUTHORITY_TRIAGE_MODE:-off}
 AUTHORITY_QA_ALLOW_EARLY_BAN=${AUTHORITY_QA_ALLOW_EARLY_BAN:-false}
+AUTHORITY_MANIFEST_NAME=${AUTHORITY_MANIFEST_NAME:-}
 CADDY_EMAIL=$CADDY_EMAIL
 # Empty in legacy mode; compose then falls back to the :local tags that
 # a droplet-side build produces.
@@ -469,15 +470,38 @@ fi
 # looks healthy (the running authority serves its in-memory copy) and
 # detonates on the next container restart, when every hard-verifying
 # client rejects the manifest at once. Ordering: materialize to a
-# staging name, sign the staged bytes, and only THEN touch the live
-# pair — so a signing failure (image predating sign-manifest, docker
-# hiccup) leaves the previous manifest+signature pair fully intact,
-# and any later interruption degrades to a missing signature.
+# staging name, finalize it for discovery review, sign the staged
+# bytes, and only THEN touch the live pair — so a finalize or signing
+# failure (image predating its subcommand, docker hiccup) leaves the
+# previous manifest+signature pair fully intact, and any later
+# interruption degrades to a missing signature.
 ssh_do "python3 /opt/onym-infra/deploy/digitalocean/materialize-authority-manifest.py \
     /opt/onym-infra/moderation/authority/manifest/manifest.json \
     /opt/onym-infra/runtime/authority-manifest/manifest.json.next \
     $OPERATOR_KEY $AUTHORITY_HOST"
 ok "Authority manifest names $OPERATOR_KEY"
+
+# Finalize the staged manifest for the clients' discovery-seat review:
+# inject the top-level `name` and `endpoints` the catalog adapters
+# read, and embed the operator's Ed25519 signature over the discovery
+# profile's canonical signing bytes — without it, destination-manifest
+# review rejects and the discovery catalog cannot carry the authority
+# row. Runs inside the authority image because embedding needs the
+# signing seed, which never leaves authority.env — same posture as
+# derive-operator-key. The service's own /manifest mount stays :ro;
+# the rewrite goes through a run-scoped rw mount at /manifest-rw
+# instead, and only touches the staged file, never the live pair.
+# `name` and the endpoint URL come from AUTHORITY_MANIFEST_NAME and
+# AUTHORITY_PUBLIC_URL, defaulted in docker-compose.yml.
+info "Finalizing authority manifest for discovery review..."
+if ! ssh_do "cd /opt/onym-infra && docker compose run --rm --no-deps \
+    --volume /opt/onym-infra/runtime/authority-manifest:/manifest-rw \
+    authority onym-moderation-authority finalize-manifest /manifest-rw/manifest.json.next"; then
+    err "authority could not finalize the manifest; is the image built from a"
+    err "moderation submodule that has the finalize-manifest subcommand?"
+    err "(The live manifest and its signature were not touched.)"
+    exit 1
+fi
 
 # Sign the exact staged bytes inside the authority image, so the seed
 # stays in authority.env — same posture as derive-operator-key
