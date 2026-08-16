@@ -217,8 +217,18 @@ jobs:
           MODERATION_AUTHORITY_TOKEN=$MODERATION_ANDROID_AUTHORITY_TOKEN
           MODERATION_AUDIT_TOKEN=$MODERATION_ANDROID_AUDIT_TOKEN
           EOF
-          if [ -n "$MODERATION_PLAY_SA_KEY_JSON" ]; then
-            printf 'MODERATION_PLAY_SA_KEY_JSON=%s\n' "$MODERATION_PLAY_SA_KEY_JSON" >> moderation-android.env
+          # The key file is often pasted pretty-printed, and env_file
+          # is line-oriented — a multi-line value broke compose with
+          # `unexpected character '"' in variable name`. Fold real
+          # newlines away: JSON whitespace outside strings is
+          # insignificant, and the private_key's \n are ESCAPED inside
+          # a JSON string, so the folded value is the same document.
+          # (Same trick as the DeviceCheck PEM fold above, inverted:
+          # the PEM needs its newlines escaped, JSON just drops them.)
+          SA_KEY_ONE_LINE="${MODERATION_PLAY_SA_KEY_JSON//$'\n'/}"
+          SA_KEY_ONE_LINE="${SA_KEY_ONE_LINE//$'\r'/}"
+          if [ -n "$SA_KEY_ONE_LINE" ]; then
+            printf 'MODERATION_PLAY_SA_KEY_JSON=%s\n' "$SA_KEY_ONE_LINE" >> moderation-android.env
           fi
 
           # AUTHORITY_INTERFACE_TOKEN is deliberately the same secret as
