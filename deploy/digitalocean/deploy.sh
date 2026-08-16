@@ -3,7 +3,8 @@
 # deploy.sh — Deploy the consolidated onym.app backend to DigitalOcean.
 #
 # Stack: Caddy (auto-HTTPS) + strfry (Nostr) + blossom + onym-relayer +
-# the two onym-moderation services (enforcement interface, authority).
+# the three onym-moderation services (Apple + Android enforcement
+# interfaces, authority).
 # Idempotent: reuses the droplet recorded in .env, re-syncs config, and
 # rebuilds containers. Safe to run repeatedly.
 #
@@ -14,6 +15,7 @@
 #   cp .env.example .env && $EDITOR .env          # fill DO_API_KEY, CF_API_TOKEN, ...
 #   cp relayer.env.example relayer.env && $EDITOR relayer.env   # fill RELAYER_SECRET_KEY, ...
 #   cp moderation.env.example moderation.env && $EDITOR moderation.env  # DeviceCheck key, seed, ...
+#   cp moderation-android.env.example moderation-android.env && $EDITOR moderation-android.env  # Play SA key, seed, ...
 #   cp authority.env.example authority.env && $EDITOR authority.env     # signing seed, tokens, ...
 #   ./deploy/digitalocean/deploy.sh
 #
@@ -24,6 +26,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 RELAYER_ENV="$REPO_ROOT/relayer.env"
 MODERATION_ENV="$REPO_ROOT/moderation.env"
+MODERATION_ANDROID_ENV="$REPO_ROOT/moderation-android.env"
 AUTHORITY_ENV="$REPO_ROOT/authority.env"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -46,6 +49,18 @@ grep -q '^RELAYER_SECRET_KEY=S' "$RELAYER_ENV" || { err "relayer.env: RELAYER_SE
 [ -f "$MODERATION_ENV" ] || { err "Missing $MODERATION_ENV — copy moderation.env.example and fill it in."; exit 1; }
 grep -qE '^MODERATION_INTERFACE_SIGNING_SEED=[0-9a-fA-F]{64}$' "$MODERATION_ENV" \
     || { err "moderation.env: MODERATION_INTERFACE_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
+[ -f "$MODERATION_ANDROID_ENV" ] || { err "Missing $MODERATION_ANDROID_ENV — copy moderation-android.env.example and fill it in."; exit 1; }
+grep -qE '^MODERATION_INTERFACE_SIGNING_SEED=[0-9a-fA-F]{64}$' "$MODERATION_ANDROID_ENV" \
+    || { err "moderation-android.env: MODERATION_INTERFACE_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
+# The two interfaces are different components with different
+# countersigning identities; a shared seed would make their
+# countersignatures interchangeable, which the per-component key
+# scoping exists to prevent.
+if [ "$(grep -E '^MODERATION_INTERFACE_SIGNING_SEED=' "$MODERATION_ENV")" = "$(grep -E '^MODERATION_INTERFACE_SIGNING_SEED=' "$MODERATION_ANDROID_ENV")" ]; then
+    err "moderation.env and moderation-android.env share one MODERATION_INTERFACE_SIGNING_SEED —"
+    err "the Apple and Android interfaces must countersign with different keys."
+    exit 1
+fi
 [ -f "$AUTHORITY_ENV" ] || { err "Missing $AUTHORITY_ENV — copy authority.env.example and fill it in."; exit 1; }
 grep -qE '^AUTHORITY_SIGNING_SEED=[0-9a-fA-F]{64}$' "$AUTHORITY_ENV" \
     || { err "authority.env: AUTHORITY_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
@@ -71,6 +86,7 @@ grep -qE '^AUTHORITY_ADMIN_TOKEN=.+$' "$AUTHORITY_ENV" \
 : "${BLOSSOM_HOST:?set BLOSSOM_HOST in .env}"
 : "${RELAYER_HOST:?set RELAYER_HOST in .env}"
 : "${MODERATION_HOST:?set MODERATION_HOST in .env}"
+: "${MODERATION_ANDROID_HOST:?set MODERATION_ANDROID_HOST in .env}"
 : "${AUTHORITY_HOST:?set AUTHORITY_HOST in .env}"
 : "${MODERATION_ENFORCE_SIGNATURES:?set MODERATION_ENFORCE_SIGNATURES in .env (normally true)}"
 : "${CADDY_EMAIL:?set CADDY_EMAIL in .env}"
@@ -78,6 +94,8 @@ grep -qE '^AUTHORITY_ADMIN_TOKEN=.+$' "$AUTHORITY_ENV" \
     || { err "AUTHORITY_HOST must be a hostname without a scheme or path."; exit 1; }
 [[ "$MODERATION_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
     || { err "MODERATION_HOST must be a hostname without a scheme or path."; exit 1; }
+[[ "$MODERATION_ANDROID_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
+    || { err "MODERATION_ANDROID_HOST must be a hostname without a scheme or path."; exit 1; }
 DO_REGION="${DO_REGION:-ams3}"
 DO_DROPLET_SIZE="${DO_DROPLET_SIZE:-s-1vcpu-2gb}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
@@ -85,7 +103,7 @@ SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 SSH_KEY_PATH="${SSH_KEY_PATH/#\~/$HOME}"
 # This array drives both the Cloudflare A records and the post-deploy
 # health checks, so a host that is missing here silently gets neither.
-HOSTS=("$NOSTR_HOST" "$BLOSSOM_HOST" "$RELAYER_HOST" "$MODERATION_HOST" "$AUTHORITY_HOST")
+HOSTS=("$NOSTR_HOST" "$BLOSSOM_HOST" "$RELAYER_HOST" "$MODERATION_HOST" "$MODERATION_ANDROID_HOST" "$AUTHORITY_HOST")
 
 save_env() {
     # Rewrite only the droplet identity this run resolved, preserving
@@ -141,7 +159,7 @@ fi
 #
 #   unset  Legacy: sources are rsynced and built in place. It works, and
 #          it is also why this deployment cannot be more than one box —
-#          three Rust builds on a 2GB droplet, serialized so they do not
+#          four Rust builds on a 2GB droplet, serialized so they do not
 #          OOM. Nothing here is a second machine until images are built
 #          once and pulled many times.
 #
@@ -158,7 +176,7 @@ DOCR_HOST="registry.digitalocean.com"
 # credential by going stale rather than by anyone remembering to revoke.
 DOCR_CRED_TTL="${DOCR_CRED_TTL:-2592000}"   # 30 days
 BUILDX_BUILDER="onym-infra"
-RELAYER_IMAGE=""; MODERATION_IMAGE=""; AUTHORITY_IMAGE=""
+RELAYER_IMAGE=""; MODERATION_IMAGE=""; MODERATION_ANDROID_IMAGE=""; AUTHORITY_IMAGE=""
 
 # <image-name> <build-context> -> a registry ref tagged with the commit
 # of the submodule that context lives in.
@@ -228,10 +246,12 @@ if [ -n "$DOCR_NAME" ]; then
 
     RELAYER_IMAGE="$(image_ref relayer relayer)"
     MODERATION_IMAGE="$(image_ref moderation-apple moderation/apple)"
+    MODERATION_ANDROID_IMAGE="$(image_ref moderation-android moderation/android)"
     AUTHORITY_IMAGE="$(image_ref moderation-authority moderation/authority)"
-    ensure_image "$RELAYER_IMAGE"    relayer
-    ensure_image "$MODERATION_IMAGE" moderation/apple
-    ensure_image "$AUTHORITY_IMAGE"  moderation/authority
+    ensure_image "$RELAYER_IMAGE"            relayer
+    ensure_image "$MODERATION_IMAGE"         moderation/apple
+    ensure_image "$MODERATION_ANDROID_IMAGE" moderation/android
+    ensure_image "$AUTHORITY_IMAGE"          moderation/authority
     ok "Images ready"
 else
     warn "DOCR_NAME unset — building on the droplet. See README: Container images."
@@ -336,9 +356,11 @@ rsync -az --delete \
     -e "ssh ${SSH_OPTS[*]}" \
     --exclude '.git' --exclude 'relayer/target' \
     --exclude 'moderation/apple/target' --exclude 'moderation/authority/target' \
+    --exclude 'moderation/android/target' \
     --exclude 'runtime/' \
     --exclude '.env' \
-    --exclude 'relayer.env' --exclude 'moderation.env' --exclude 'authority.env' \
+    --exclude 'relayer.env' --exclude 'moderation.env' --exclude 'moderation-android.env' \
+    --exclude 'authority.env' \
     --exclude '*.log' --exclude '.DS_Store' \
     "$REPO_ROOT/" "root@$DROPLET_IP:/opt/onym-infra/"
 
@@ -354,11 +376,16 @@ NOSTR_HOST=$NOSTR_HOST
 BLOSSOM_HOST=$BLOSSOM_HOST
 RELAYER_HOST=$RELAYER_HOST
 MODERATION_HOST=$MODERATION_HOST
+MODERATION_ANDROID_HOST=$MODERATION_ANDROID_HOST
 AUTHORITY_HOST=$AUTHORITY_HOST
 MODERATION_DEVICECHECK_ENV=${MODERATION_DEVICECHECK_ENV:-production}
 MODERATION_ENFORCE_SIGNATURES=$MODERATION_ENFORCE_SIGNATURES
 MODERATION_INTERFACE_KEY_EPOCHS=${MODERATION_INTERFACE_KEY_EPOCHS:-}
+MODERATION_ANDROID_INTERFACE_KEY_EPOCHS=${MODERATION_ANDROID_INTERFACE_KEY_EPOCHS:-}
+MODERATION_PLAY_PACKAGE_NAME=${MODERATION_PLAY_PACKAGE_NAME:-}
+MODERATION_PLAY_CERT_SHA256_DIGESTS=${MODERATION_PLAY_CERT_SHA256_DIGESTS:-}
 AUTHORITY_INTERFACE_KEY=${AUTHORITY_INTERFACE_KEY:-}
+AUTHORITY_INTERFACE_KEYS_BY_COMPONENT=${AUTHORITY_INTERFACE_KEYS_BY_COMPONENT:-}
 AUTHORITY_TRIAGE_MODE=${AUTHORITY_TRIAGE_MODE:-off}
 AUTHORITY_QA_ALLOW_EARLY_BAN=${AUTHORITY_QA_ALLOW_EARLY_BAN:-false}
 CADDY_EMAIL=$CADDY_EMAIL
@@ -366,10 +393,12 @@ CADDY_EMAIL=$CADDY_EMAIL
 # a droplet-side build produces.
 RELAYER_IMAGE=$RELAYER_IMAGE
 MODERATION_IMAGE=$MODERATION_IMAGE
+MODERATION_ANDROID_IMAGE=$MODERATION_ANDROID_IMAGE
 AUTHORITY_IMAGE=$AUTHORITY_IMAGE
 EOF
 scp "${SSH_OPTS[@]}" "$RELAYER_ENV" "root@$DROPLET_IP:/opt/onym-infra/relayer.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$MODERATION_ENV" "root@$DROPLET_IP:/opt/onym-infra/moderation.env" >/dev/null
+scp "${SSH_OPTS[@]}" "$MODERATION_ANDROID_ENV" "root@$DROPLET_IP:/opt/onym-infra/moderation-android.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$AUTHORITY_ENV" "root@$DROPLET_IP:/opt/onym-infra/authority.env" >/dev/null
 
 ssh_do "mkdir -p /opt/onym-infra/runtime/authority-manifest"
@@ -388,7 +417,7 @@ if [ -n "$DOCR_NAME" ]; then
     info "Pulling images on the droplet..."
     ssh_do "cd /opt/onym-infra && docker compose pull"
 else
-    info "Building containers serially (three Rust builds; the first run takes a while)..."
+    info "Building containers serially (four Rust builds; the first run takes a while)..."
     ssh_do "cd /opt/onym-infra && COMPOSE_PARALLEL_LIMIT=1 docker compose build"
 fi
 
@@ -484,6 +513,7 @@ check "https://$RELAYER_HOST/" "relayer"   # expect 401/422 (auth/validation) = 
 check "https://$BLOSSOM_HOST/" "blossom"
 check "https://$NOSTR_HOST/"   "nostr"     # expect 400/426 on plain GET = up
 check_health "https://$MODERATION_HOST/health" "moderation" "Check: docker compose logs moderation"
+check_health "https://$MODERATION_ANDROID_HOST/health" "moderation-android" "Check: docker compose logs moderation-android"
 check_health "https://$AUTHORITY_HOST/health"  "authority"  "Check: docker compose logs authority"
 # A term nobody can read is a term nobody agreed to, so the published
 # documents are checked like a service rather than assumed. /policy/csam
@@ -552,12 +582,14 @@ ok "Done. Droplet $DROPLET_ID @ $DROPLET_IP"
 if [ -n "$DOCR_NAME" ]; then
     echo "  Images:     $RELAYER_IMAGE"
     echo "              $MODERATION_IMAGE"
+    echo "              $MODERATION_ANDROID_IMAGE"
     echo "              $AUTHORITY_IMAGE"
 fi
 echo "  Nostr:      wss://$NOSTR_HOST"
 echo "  Blossom:    https://$BLOSSOM_HOST"
 echo "  Relayer:    https://$RELAYER_HOST"
 echo "  Moderation: https://$MODERATION_HOST"
+echo "  Moderation (Android): https://$MODERATION_ANDROID_HOST"
 echo "  Authority:  https://$AUTHORITY_HOST"
 echo "  Logs:       ssh -i $SSH_KEY_PATH root@$DROPLET_IP 'cd /opt/onym-infra && docker compose logs -f'"
 # The authority cannot verify a mandate's countersignature until it
@@ -568,4 +600,11 @@ if [ -z "${AUTHORITY_INTERFACE_KEY:-}" ]; then
     echo
     warn "AUTHORITY_INTERFACE_KEY is unset. Read interfaceKey from"
     warn "  https://$MODERATION_HOST/health, set it in .env (or the repo variable), and re-run."
+fi
+if [ -z "${AUTHORITY_INTERFACE_KEYS_BY_COMPONENT:-}" ]; then
+    echo
+    warn "AUTHORITY_INTERFACE_KEYS_BY_COMPONENT is unset — Android mandates cannot register."
+    warn "Read interfaceKey from https://$MODERATION_ANDROID_HOST/health and set"
+    warn "  AUTHORITY_INTERFACE_KEYS_BY_COMPONENT=onym:component:onym-android=<that key>"
+    warn "in .env (or the repo variable), then re-run."
 fi

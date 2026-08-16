@@ -2,6 +2,7 @@
 .env
 relayer.env
 moderation.env
+moderation-android.env
 authority.env
 
 # Deployment-generated public artifacts. The authority manifest is
