@@ -192,6 +192,11 @@ services:
       # boot the same classifier.
       - MODERATION_PLAY_PACKAGE_NAME=${MODERATION_PLAY_PACKAGE_NAME:-app.onym.android}
       - MODERATION_PLAY_CERT_SHA256_DIGESTS=${MODERATION_PLAY_CERT_SHA256_DIGESTS:-}
+      # INTERIM pre-device-recall-grant switch: "false" lets the gate
+      # answer from prerequisites 1-4 when tokens carry no deviceRecall
+      # object (no token does until Google's grant lands). Default
+      # true = the strict profile; flip back the day the grant lands.
+      - MODERATION_REQUIRE_RECALL=${MODERATION_REQUIRE_RECALL:-true}
       - MODERATION_INTERFACE_KEY_EPOCHS=${MODERATION_ANDROID_INTERFACE_KEY_EPOCHS:-}
       - MODERATION_ENFORCE_SIGNATURES=${MODERATION_ENFORCE_SIGNATURES:?set MODERATION_ENFORCE_SIGNATURES in .env (normally true)}
       - MODERATION_ALLOW_UNAUTHENTICATED_AUTHORITY=${MODERATION_ALLOW_UNAUTHENTICATED_AUTHORITY:-false}
