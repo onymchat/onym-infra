@@ -178,8 +178,10 @@ services:
       - MODERATION_INTERFACE_COMPONENT_ID=${MODERATION_ANDROID_INTERFACE_COMPONENT_ID:-onym:component:onym-android}
       # Which app + signing certificate a decoded integrity token must
       # name (classifier conditions 1–2). Not secrets: the package name
-      # is public and the digest is of a public certificate.
-      - MODERATION_PLAY_PACKAGE_NAME=${MODERATION_PLAY_PACKAGE_NAME:-}
+      # is public and the digest is of a public certificate. The
+      # package default matches the workflow's so local and CI deploys
+      # boot the same classifier.
+      - MODERATION_PLAY_PACKAGE_NAME=${MODERATION_PLAY_PACKAGE_NAME:-app.onym.android}
       - MODERATION_PLAY_CERT_SHA256_DIGESTS=${MODERATION_PLAY_CERT_SHA256_DIGESTS:-}
       - MODERATION_INTERFACE_KEY_EPOCHS=${MODERATION_ANDROID_INTERFACE_KEY_EPOCHS:-}
       - MODERATION_ENFORCE_SIGNATURES=${MODERATION_ENFORCE_SIGNATURES:?set MODERATION_ENFORCE_SIGNATURES in .env (normally true)}

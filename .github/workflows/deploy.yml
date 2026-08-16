@@ -37,10 +37,11 @@ name: Deploy
 #                                    expected state until device-recall access lands
 #   MODERATION_ANDROID_INTERFACE_SIGNING_SEED  64 hex chars, DIFFERENT from the
 #                                    Apple interface's seed (deploy.sh enforces it)
-#   MODERATION_ANDROID_AUTHORITY_TOKEN  Bearer token the authority presents on the
-#                                    Android backend's POST /v1/verdicts. Written
-#                                    into the authority's AUTHORITY_INTERFACE_ROUTES
-#                                    entry — one secret, two files, same pattern as
+#   MODERATION_ANDROID_AUTHORITY_TOKEN  REQUIRED (the job fails without it): bearer
+#                                    token the authority presents on the Android
+#                                    backend's POST /v1/verdicts. Written into the
+#                                    authority's AUTHORITY_INTERFACE_ROUTES entry —
+#                                    one secret, two files, same pattern as
 #                                    MODERATION_AUTHORITY_TOKEN
 #   MODERATION_ANDROID_AUDIT_TOKEN   (optional) bearer for its GET /v1/write-log
 #
@@ -198,6 +199,14 @@ jobs:
           MODERATION_AUDIT_TOKEN=$MODERATION_AUDIT_TOKEN
           EOF
 
+          # An unset Android authority token would deploy green with a
+          # dead verdict path: the backend's /v1/verdicts refuses
+          # everything, and the routes line below would carry an empty
+          # bearer. Fail here instead.
+          if [ -z "$MODERATION_ANDROID_AUTHORITY_TOKEN" ]; then
+            echo "::error::MODERATION_ANDROID_AUTHORITY_TOKEN secret is not set — Android verdict delivery would be dead. Set it (openssl rand -hex 32) and re-run."
+            exit 1
+          fi
           # The SA key line is written only when the secret is set: a
           # PRESENT-but-empty MODERATION_PLAY_SA_KEY_JSON is parsed
           # (and fails) by the service, while an ABSENT one is the

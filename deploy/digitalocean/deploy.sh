@@ -61,6 +61,24 @@ if [ "$(grep -E '^MODERATION_INTERFACE_SIGNING_SEED=' "$MODERATION_ENV")" = "$(g
     err "the Apple and Android interfaces must countersign with different keys."
     exit 1
 fi
+# An empty token here fails SILENTLY at the worst spot: the deploy
+# goes green, and every verdict the authority delivers to the Android
+# interface is refused at its /v1/verdicts. Same posture as the
+# AUTHORITY_ADMIN_TOKEN check below.
+grep -qE '^MODERATION_AUTHORITY_TOKEN=.+$' "$MODERATION_ANDROID_ENV" \
+    || { err "moderation-android.env: MODERATION_AUTHORITY_TOKEN is required — without it the"; \
+         err "Android verdict endpoint refuses everything and delivery dies silently."; exit 1; }
+# The SA key without cert digests is a silently-degraded deployment:
+# play_configured() requires both, so the gate keeps answering
+# checkRequired while the operator believes enforcement is on.
+if grep -qE '^MODERATION_PLAY_SA_KEY_JSON=.+$' "$MODERATION_ANDROID_ENV" \
+    && [ -z "${MODERATION_PLAY_CERT_SHA256_DIGESTS:-}" ]; then
+    err "moderation-android.env sets MODERATION_PLAY_SA_KEY_JSON but"
+    err "MODERATION_PLAY_CERT_SHA256_DIGESTS is empty in .env — the service would stay"
+    err "degraded (checkRequired for everyone) despite the key. Set the digest(s),"
+    err "base64url-nopad (see .env.example for the conversion)."
+    exit 1
+fi
 [ -f "$AUTHORITY_ENV" ] || { err "Missing $AUTHORITY_ENV — copy authority.env.example and fill it in."; exit 1; }
 grep -qE '^AUTHORITY_SIGNING_SEED=[0-9a-fA-F]{64}$' "$AUTHORITY_ENV" \
     || { err "authority.env: AUTHORITY_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
@@ -70,6 +88,15 @@ grep -qE '^AUTHORITY_SIGNING_SEED=[0-9a-fA-F]{64}$' "$AUTHORITY_ENV" \
 # error rather than a service health surprise.
 grep -qE '^AUTHORITY_ADMIN_TOKEN=.+$' "$AUTHORITY_ENV" \
     || { err "authority.env: AUTHORITY_ADMIN_TOKEN is required while autonomous triage is off."; exit 1; }
+# Without an Android route, verdicts for onym:component:onym-android
+# mandates fall through to the DEFAULT route and land on the Apple
+# interface, which never countersigned them (no_mandate, retired after
+# a few refusals). The trailing `|.+` also refuses a route whose
+# bearer token is empty — that parses upstream but delivers nothing.
+grep -qE '^AUTHORITY_INTERFACE_ROUTES=.*onym:component:onym-android=https://[^|,]+\|.+$' "$AUTHORITY_ENV" \
+    || { err "authority.env: AUTHORITY_INTERFACE_ROUTES must carry an entry"; \
+         err "  onym:component:onym-android=https://<android-host>|<token>"; \
+         err "or Android verdicts are delivered to the Apple interface. See authority.env.example."; exit 1; }
 
 # The reference manifest and policy documents ship in the submodule.
 # Deployment cannot safely continue without them: the authority would
@@ -382,6 +409,7 @@ MODERATION_DEVICECHECK_ENV=${MODERATION_DEVICECHECK_ENV:-production}
 MODERATION_ENFORCE_SIGNATURES=$MODERATION_ENFORCE_SIGNATURES
 MODERATION_INTERFACE_KEY_EPOCHS=${MODERATION_INTERFACE_KEY_EPOCHS:-}
 MODERATION_ANDROID_INTERFACE_KEY_EPOCHS=${MODERATION_ANDROID_INTERFACE_KEY_EPOCHS:-}
+MODERATION_ANDROID_INTERFACE_COMPONENT_ID=${MODERATION_ANDROID_INTERFACE_COMPONENT_ID:-onym:component:onym-android}
 MODERATION_PLAY_PACKAGE_NAME=${MODERATION_PLAY_PACKAGE_NAME:-}
 MODERATION_PLAY_CERT_SHA256_DIGESTS=${MODERATION_PLAY_CERT_SHA256_DIGESTS:-}
 AUTHORITY_INTERFACE_KEY=${AUTHORITY_INTERFACE_KEY:-}
