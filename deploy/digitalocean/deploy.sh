@@ -125,7 +125,27 @@ grep -qE '^AUTHORITY_INTERFACE_ROUTES=.*onym:component:onym-android=https://[^|,
 [[ "$MODERATION_ANDROID_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
     || { err "MODERATION_ANDROID_HOST must be a hostname without a scheme or path."; exit 1; }
 DO_REGION="${DO_REGION:-ams3}"
-DO_DROPLET_SIZE="${DO_DROPLET_SIZE:-s-1vcpu-2gb}"
+# Seven containers, and strfry alone wants CPU for secp256k1 verification
+# on every ingest plus per-subscription matching of every new event. The
+# old s-1vcpu-2gb was already at its ceiling — cloud-init below adds a
+# 2G swapfile specifically because the relayer build OOMed on it.
+#
+# NOTE: this only applies to a droplet being CREATED. The reuse branch
+# below adopts an existing droplet by name and never resizes it, so
+# changing this does NOT grow the running box. Growing the live one is
+# a resize (same droplet ID, same public IP — the Cloudflare records
+# below stay valid — same volumes, data intact), but it needs a
+# power-off, so it stays deliberately manual:
+#   doctl compute droplet-action power-off <ID> --wait
+#   doctl compute droplet-action resize <ID> --size s-2vcpu-4gb --wait
+#   doctl compute droplet-action power-on <ID> --wait
+#
+# Deliberately WITHOUT --resize-disk: a CPU/RAM-only resize is
+# reversible, a disk resize is permanent and locks out ever scaling
+# back down. Disk is not the constraint here (~450 MB/yr against the
+# existing 50 GB — see README "Capacity"), so the 50 GB disk carries
+# over unchanged and the option to downsize is worth more than it.
+DO_DROPLET_SIZE="${DO_DROPLET_SIZE:-s-2vcpu-4gb}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 # Expand a leading ~ / $HOME that survived from .env.
 SSH_KEY_PATH="${SSH_KEY_PATH/#\~/$HOME}"

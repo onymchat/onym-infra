@@ -26,10 +26,28 @@ name: onym-infra
 # authority reaches the interface over its public hostname and not over
 # this network — see `AUTHORITY_INTERFACE_URL` below.
 
+# Memory limits. Every service is capped so that no single container can
+# exhaust the box and let the kernel's OOM killer pick the victim. That
+# matters most for the two moderation services: the authority/interface
+# split is a deliberate separation of powers, and an unbounded relay
+# taking down the authority would undo it at the kernel level, far below
+# where the design reasons about it.
+#
+# strfry gets the largest share because it is the only service with
+# unbounded fan-out — a client REQ with no `limit` buffers the whole
+# result set, and the strfry release we run (1.1.1) has no outbound
+# buffer cap; `maxPendingOutboundBytes` exists only on upstream master.
+# Until the client paginates or uses negentropy for backfill, this limit
+# IS the cap. A relay that gets killed and restarts is a far better
+# outcome than one that takes the authority with it.
+#
+# Budgeted for s-2vcpu-4gb: 3008M capped, leaving ~1.0G for the host,
+# dockerd and page cache. Revisit these together if the droplet resizes.
 services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    mem_limit: 256m
     ports:
       - "80:80"
       - "443:443"
@@ -74,8 +92,13 @@ services:
     depends_on: [nostr-relay, blossom, relayer, moderation, moderation-android, authority]
 
   nostr-relay:
-    image: dockurr/strfry:latest
+    # Pinned deliberately. This was `:latest`, which had drifted — the
+    # running container reported 1.1.0 while `latest` had moved on to
+    # 1.1.1, so the next pull would have changed relay versions during
+    # whatever deploy happened to trigger it. Upgrade on purpose.
+    image: dockurr/strfry:1.1.1
     restart: unless-stopped
+    mem_limit: 1g
     volumes:
       - ./strfry/strfry.conf:/etc/strfry.conf:ro
       - strfry-data:/app/strfry-db
@@ -87,6 +110,7 @@ services:
     environment:
       - DATA_DIR=/app/data
       - PORT=3000
+    mem_limit: 384m
     volumes:
       - blossom-data:/app/data
     networks: [internal]
@@ -113,6 +137,7 @@ services:
       # Committed here so CI deploys it; `environment:` wins over
       # env_file, keeping the droplet's relayer.env free of this key.
       - RELAYER_OPERATOR_MANIFEST=/srv/operator-manifest/manifest.json
+    mem_limit: 384m
     networks: [internal]
 
   # The enforcement backend — "the interface" in onym-moderation's
@@ -125,6 +150,7 @@ services:
       context: ./moderation/apple
       dockerfile: Dockerfile
     restart: unless-stopped
+    mem_limit: 320m
     # Secrets (the DeviceCheck .p8 and key/team ids, the interface
     # signing seed, the token the authority presents) live in
     # moderation.env — never committed. See moderation.env.example.
@@ -173,6 +199,7 @@ services:
       context: ./moderation/android
       dockerfile: Dockerfile
     restart: unless-stopped
+    mem_limit: 320m
     # Secrets (the Google service-account JSON, the interface signing
     # seed, the token the authority presents) live in
     # moderation-android.env — never committed. See
@@ -220,6 +247,7 @@ services:
       context: ./moderation/authority
       dockerfile: Dockerfile
     restart: unless-stopped
+    mem_limit: 320m
     # Secrets (the verdict signing seed, the interface token, the
     # moderator and admin tokens) live in authority.env — never
     # committed. See authority.env.example.

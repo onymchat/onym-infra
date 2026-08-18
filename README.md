@@ -408,6 +408,121 @@ name lookup. DNS records are upserted, not duplicated.
 deploy the droplet is created with it; on later runs the same key must
 still be authorized (use the same secret across runs).
 
+## Capacity
+
+The droplet is `s-2vcpu-4gb` (raised from `s-1vcpu-2gb`, which was
+already at its ceiling — cloud-init adds a 2G swapfile precisely
+because the relayer build OOMed on it).
+
+**Changing `DO_DROPLET_SIZE` does not resize the running box.**
+`deploy.sh` adopts an existing droplet by name and never resizes it, so
+the new default only applies to a droplet being created — a deploy will
+not recreate or resize anything.
+
+Growing the live box is a **resize, not a recreate**: same droplet ID,
+same public IP (the Cloudflare records stay valid), same volumes, data
+intact. It needs a power-off, so it stays deliberately manual — the
+`doctl` sequence is in the comment above `DO_DROPLET_SIZE` in
+`deploy/digitalocean/deploy.sh`. That sequence omits `--resize-disk` on
+purpose: a CPU/RAM-only resize is reversible, a disk resize is
+permanent and forecloses ever scaling back down. Disk is not the
+constraint here, so the 50 GB carries over unchanged.
+
+Because the limits below are budgeted for 4G, **resize before or with
+the deploy that lands them** — 3008M of caps on a 2G box will start
+killing containers.
+
+Every service now carries a `mem_limit` (3008M capped of 4G, leaving
+~1.0G for the host and page cache). The point is blast radius, not
+efficiency: with no limits, an unbounded relay response lets the
+kernel's OOM killer choose the victim, and it may well choose the
+authority — silently undoing the authority/interface separation of
+powers several layers below where the design reasons about it. A
+killed relay that restarts is an acceptable outcome; a killed
+authority is not.
+
+What actually constrains this box, in the order it will bite:
+
+1. **RAM during replay.** A client REQ with no `limit` buffers its
+   whole result set, and strfry 1.1.1 has no outbound buffer cap —
+   `maxPendingOutboundBytes` exists only on upstream master, in no
+   released tag. Until the client paginates or uses negentropy, the
+   relay's `mem_limit` *is* the cap.
+2. **CPU.** `ingester` runs secp256k1 verification on every event and
+   `reqMonitor` matches each new event against every open subscription,
+   so both scale with connections rather than cores. `numThreads` is
+   sized to the 2 vCPUs rather than to strfry's 3/3/3/2 defaults.
+3. **Disk.** Not a constraint and won't be. ~35k events stored at
+   ~1–2 KB each is well under 100 MB; even a *sustained* 800 events/day
+   (the 2026-08-16 incident peak, as an everyday rate) is ~450 MB/yr
+   against a 50 GB SSD. Retention policy should never be argued from
+   disk here — see below for what it is actually for.
+
+The strfry image is **pinned** (`dockurr/strfry:1.1.1`). It was
+`:latest`, which had drifted: the running container was 1.1.0 while
+`latest` had moved to 1.1.1, so the next pull would have changed relay
+versions during whatever deploy happened to trigger it.
+
+## Relay retention
+
+**The relay applies no blanket TTL. Retention is decided per event by
+the client, with a NIP-40 `expiration` tag.**
+
+The reason for that split is the client's restore path. A device that
+loses its local store recovers by replaying `nostr.onym.app` with an
+unlimited REQ — the relay is the only durable copy of a conversation
+(this is also why `maxFilterLimit` is 100000; see commit `2bab420`). A
+server-side cutoff would therefore cap every future restore at the
+cutoff, and users would discover that only at the moment they needed
+the history. Per-event expiration puts the same lifetime decision in
+the client, where it is a product feature — disappearing messages —
+that the sender chooses knowingly, instead of a silent infra policy.
+
+**strfry needs no configuration for this and never did.** NIP-40 is
+enforced unconditionally in the build we run:
+
+- the `expiration` tag is parsed at ingest and indexed
+  (`src/events.cpp`),
+- a cron sweeps the expiration index every ~9s and **hard-deletes**
+  expired events — this is not query-time hiding, the bytes leave LMDB
+  (`src/apps/relay/RelayCron.cpp`),
+- an event whose `expiration` is already in the past is **rejected** at
+  ingest with `event expired`.
+
+So there is nothing to turn on here. Everything below is the client
+contract, and getting it wrong fails silently — events simply live
+forever and nobody notices.
+
+**The tag must go on the outer `kind:1059` giftwrap.** An `expiration`
+inside the sealed rumor is encrypted, so the relay cannot see it and
+will not act on it. This is the mistake to watch for. The tradeoff is
+that the expiry timestamp is public metadata on the wrapper: the relay
+(and anyone who can read the wrapper) learns *when* a message dies,
+though not what it is or who wrote it. That is judged acceptable; the
+alternative leaks nothing but also expires nothing.
+
+Other edges worth knowing:
+
+- Only the **first** `expiration` tag on an event is honoured; later
+  ones are ignored, not merged or minimised.
+- A value below `100` is rejected outright as invalid.
+- Expiry is **not** relative to `created_at` — it is an absolute unix
+  timestamp, so the client computes `now + ttl` at send time. Note that
+  NIP-59 giftwraps randomise `created_at` up to ~2 days into the past;
+  do not derive the expiration from it.
+- Once swept, an event **cannot be re-uploaded** — ingest rejects it as
+  expired. Expiry is final, including against a client trying to
+  restore from its own archive.
+- Retention is per event, so old messages sent before the client starts
+  stamping tags stay forever. Changing the client's default TTL only
+  affects new sends; it is not retroactive.
+
+Since expiry is irreversible and the relay is the backup of record, the
+sane rollout is to stamp a generous TTL first and shorten it once the
+client keeps a durable local archive with an export path — at which
+point the relay stops being the only copy and a short TTL becomes
+cheap.
+
 ## Operating
 
 ```bash
