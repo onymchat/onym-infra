@@ -416,10 +416,21 @@ because the relayer build OOMed on it).
 
 **Changing `DO_DROPLET_SIZE` does not resize the running box.**
 `deploy.sh` adopts an existing droplet by name and never resizes it, so
-the new default only applies to a droplet being created. Growing the
-live one is a power-off operation and stays deliberately manual — the
+the new default only applies to a droplet being created — a deploy will
+not recreate or resize anything.
+
+Growing the live box is a **resize, not a recreate**: same droplet ID,
+same public IP (the Cloudflare records stay valid), same volumes, data
+intact. It needs a power-off, so it stays deliberately manual — the
 `doctl` sequence is in the comment above `DO_DROPLET_SIZE` in
-`deploy/digitalocean/deploy.sh`.
+`deploy/digitalocean/deploy.sh`. That sequence omits `--resize-disk` on
+purpose: a CPU/RAM-only resize is reversible, a disk resize is
+permanent and forecloses ever scaling back down. Disk is not the
+constraint here, so the 50 GB carries over unchanged.
+
+Because the limits below are budgeted for 4G, **resize before or with
+the deploy that lands them** — 3008M of caps on a 2G box will start
+killing containers.
 
 Every service now carries a `mem_limit` (3008M capped of 4G, leaving
 ~1.0G for the host and page cache). The point is blast radius, not
@@ -444,7 +455,7 @@ What actually constrains this box, in the order it will bite:
 3. **Disk.** Not a constraint and won't be. ~35k events stored at
    ~1–2 KB each is well under 100 MB; even a *sustained* 800 events/day
    (the 2026-08-16 incident peak, as an everyday rate) is ~450 MB/yr
-   against an 80 GB SSD. Retention policy should never be argued from
+   against a 50 GB SSD. Retention policy should never be argued from
    disk here — see below for what it is actually for.
 
 The strfry image is **pinned** (`dockurr/strfry:1.1.1`). It was

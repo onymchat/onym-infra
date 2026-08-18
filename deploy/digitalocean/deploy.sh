@@ -132,11 +132,19 @@ DO_REGION="${DO_REGION:-ams3}"
 #
 # NOTE: this only applies to a droplet being CREATED. The reuse branch
 # below adopts an existing droplet by name and never resizes it, so
-# changing this does NOT grow the running box. That is a power-off
-# operation, deliberately manual:
+# changing this does NOT grow the running box. Growing the live one is
+# a resize (same droplet ID, same public IP — the Cloudflare records
+# below stay valid — same volumes, data intact), but it needs a
+# power-off, so it stays deliberately manual:
 #   doctl compute droplet-action power-off <ID> --wait
-#   doctl compute droplet-action resize <ID> --size s-2vcpu-4gb --resize-disk --wait
+#   doctl compute droplet-action resize <ID> --size s-2vcpu-4gb --wait
 #   doctl compute droplet-action power-on <ID> --wait
+#
+# Deliberately WITHOUT --resize-disk: a CPU/RAM-only resize is
+# reversible, a disk resize is permanent and locks out ever scaling
+# back down. Disk is not the constraint here (~450 MB/yr against the
+# existing 50 GB — see README "Capacity"), so the 50 GB disk carries
+# over unchanged and the option to downsize is worth more than it.
 DO_DROPLET_SIZE="${DO_DROPLET_SIZE:-s-2vcpu-4gb}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 # Expand a leading ~ / $HOME that survived from .env.
