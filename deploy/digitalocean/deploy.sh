@@ -504,46 +504,66 @@ ssh_do "mkdir -p /var/www/discovery"
 # script that runs mkfs against whatever is at that path is a script
 # that will eventually destroy someone's snapshots. Same posture as the
 # droplet resize above: the destructive step stays in a human's hands.
-# The sentinel is checked as well as the mount, and the container
-# re-checks it at every start. A `nofail` fstab entry means a reboot
+# Both sentinels are checked as well as the mount, and the container
+# re-checks them at every start. A `nofail` fstab entry means a reboot
 # where the volume does not come back still boots the box, and a bind
-# mount onto the bare directory would put sealed snapshots on the root
-# filesystem — where they are shadowed the moment the volume mounts
-# later. `mountpoint` here only ever proves something about deploy time.
-info "Checking the backup blob volume..."
-if ! ssh_do "mountpoint -q /mnt/onym-backup-blobs && test -f /mnt/onym-backup-blobs/.onym-backup-volume"; then
-    err "/mnt/onym-backup-blobs is not a mountpoint on the droplet."
+# mount onto a bare directory would put sealed snapshots — or worse,
+# an EMPTY bookkeeping database — on the root filesystem. `mountpoint`
+# here only ever proves something about deploy time.
+#
+# The two are diagnosed separately because they fail for different
+# reasons and have different fixes: an absent mount is a volume
+# problem, a mounted volume with no sentinel is a setup step that was
+# skipped.
+info "Checking the backup block volume..."
+if ! ssh_do "mountpoint -q /mnt/onym-backup"; then
+    err "/mnt/onym-backup is not a mountpoint on the droplet."
     err ""
-    err "The backup operator stores sealed snapshots there, and it must"
-    err "not be the root filesystem — filling that takes the relay and"
-    err "the authority down with it."
+    err "The backup operator stores sealed snapshots and the bookkeeping"
+    err "that accounts for them there, and it must not be the root"
+    err "filesystem — filling that takes the relay and the authority down"
+    err "with it."
     err ""
     err "Create and attach a volume (once), then format and mount it:"
-    err "  doctl compute volume create onym-backup-blobs \\"
+    err "  doctl compute volume create onym-backup \\"
     err "      --region $DO_REGION --size 100GiB --fs-type ext4"
     err "  doctl compute volume-action attach <VOLUME_ID> ${DROPLET_ID:-<DROPLET_ID>} --wait"
     err ""
     err "Then on the droplet, having checked the device is the new,"
     err "EMPTY volume — mkfs on the wrong one is unrecoverable:"
     err "  lsblk"
-    err "  mkdir -p /mnt/onym-backup-blobs"
-    err "  mount -o discard,defaults /dev/disk/by-id/scsi-0DO_Volume_onym-backup-blobs \\"
-    err "      /mnt/onym-backup-blobs"
-    err "  echo '/dev/disk/by-id/scsi-0DO_Volume_onym-backup-blobs /mnt/onym-backup-blobs ext4 defaults,nofail,discard 0 2' >> /etc/fstab"
-    err ""
-    err "Then, INSIDE the mounted volume, the two things the container"
-    err "needs. The sentinel is how it tells a mounted volume from the"
-    err "bare directory after a reboot where the mount did not return;"
-    err "the chown is because the operator runs as uid 10001 and a"
-    err "root-owned mount would leave it unable to write:"
-    err "  touch /mnt/onym-backup-blobs/.onym-backup-volume"
-    err "  chown -R 10001:10001 /mnt/onym-backup-blobs"
+    err "  mkdir -p /mnt/onym-backup"
+    err "  mount -o discard,defaults /dev/disk/by-id/scsi-0DO_Volume_onym-backup \\"
+    err "      /mnt/onym-backup"
+    err "  echo '/dev/disk/by-id/scsi-0DO_Volume_onym-backup /mnt/onym-backup ext4 defaults,nofail,discard 0 2' >> /etc/fstab"
     err ""
     err "--fs-type ext4 formats at creation, so the mkfs step is only"
-    err "needed for a volume created without it."
+    err "needed for a volume created without it. Then run this deploy"
+    err "again; it will tell you about the sentinels."
     exit 1
 fi
-ok "  /mnt/onym-backup-blobs is mounted"
+if ! ssh_do "test -f /mnt/onym-backup/blobs/.onym-backup-volume && test -f /mnt/onym-backup/state/.onym-backup-volume"; then
+    err "/mnt/onym-backup is mounted, but the backup directories are not set up."
+    err ""
+    err "Rows and bytes live on the same volume on purpose: the operator"
+    err "reconciles before serving and deletes bytes no row accounts for,"
+    err "so a fresh database against a populated volume erases every"
+    err "snapshot on first boot. Two directories rather than one keeps the"
+    err "blob root free of anything that is not a shard."
+    err ""
+    err "The sentinels are how the container tells a mounted volume from"
+    err "the bare directory after a reboot where the mount did not return."
+    err "The chown is because the operator runs as uid 10001 and a"
+    err "root-owned mount would leave it unable to write."
+    err ""
+    err "On the droplet:"
+    err "  mkdir -p /mnt/onym-backup/blobs /mnt/onym-backup/state"
+    err "  touch /mnt/onym-backup/blobs/.onym-backup-volume \\"
+    err "        /mnt/onym-backup/state/.onym-backup-volume"
+    err "  chown -R 10001:10001 /mnt/onym-backup"
+    exit 1
+fi
+ok "  /mnt/onym-backup is mounted and prepared"
 
 NO_BUILD=""
 if [ -n "$DOCR_NAME" ]; then

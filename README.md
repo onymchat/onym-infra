@@ -509,8 +509,22 @@ What actually constrains this box, in the order it will bite:
    new. Sealed snapshots are the only thing on this box measured in
    gigabytes, and the operator's own defaults would allow 6 GiB per
    holder (2 GiB x 3). They are held at 256 MiB x 2 here and live on a
-   **separate block volume** at `/mnt/onym-backup-blobs`, bind-mounted
-   into the container.
+   **separate block volume** at `/mnt/onym-backup`, bind-mounted into
+   the container.
+
+   **The bookkeeping lives on that volume too**, at
+   `/mnt/onym-backup/state`, and that is a correctness requirement
+   rather than tidiness. The operator reconciles before it serves, and
+   reconciliation deletes bytes no row accounts for. With the SQLite
+   store on the root disk, a droplet rebuild that re-attached the block
+   volume — or a `docker compose down -v` — would hand a fresh database
+   to a populated volume, and the first boot would erase every retained
+   snapshot. Rows and bytes have to live or die together.
+
+   Two directories rather than one, so the blob root contains nothing
+   but shard directories: the sweep walks `<shard>/<handle>/<digest>`,
+   and a sibling `state/` inside it would be a directory the walk has
+   to be trusted to ignore.
 
    The separation is the point. On the root filesystem those bytes
    would share 50 GB with strfry's database and both moderation
@@ -536,9 +550,10 @@ What actually constrains this box, in the order it will bite:
    later — the operator reporting `retained` for bytes nobody can
    reach.
 
-   So the volume carries a **sentinel file**, `.onym-backup-volume`,
-   and the container refuses to start without it. It lives inside the
-   volume, so it is absent exactly when the mount is. The check is in
+   So each bound directory carries a **sentinel file**,
+   `.onym-backup-volume`, and the container refuses to start unless
+   both are present. They live inside the volume, so they are absent
+   exactly when the mount is. The check is in
    the container rather than in `docker.service` deliberately: a
    `RequiresMountsFor` drop-in would let a backup volume problem refuse
    to start the relay and the authority too, which inverts the
@@ -548,7 +563,9 @@ What actually constrains this box, in the order it will bite:
 
    The volume also needs `chown -R 10001:10001` — the operator runs
    unprivileged, and a root-owned mount leaves it unable to write.
-   Both steps are in `deploy.sh`'s failure message.
+   `deploy.sh` diagnoses an absent mount and an unprepared one
+   separately, because they fail for different reasons and have
+   different fixes, and prints the exact commands for each.
 
 The strfry image is **pinned** (`dockurr/strfry:1.1.1`). It was
 `:latest`, which had drifted: the running container was 1.1.0 while

@@ -394,40 +394,42 @@ services:
       - /bin/sh
       - -c
       - |
-        if [ ! -f /blobs/.onym-backup-volume ]; then
-          echo "FATAL: /blobs is not the backup block volume (sentinel absent)." >&2
-          echo "Refusing to write sealed snapshots to the root filesystem." >&2
-          echo "On the droplet: mount /mnt/onym-backup-blobs, then check" >&2
-          echo "the sentinel and ownership — see README 'Capacity'." >&2
+        if [ ! -f /blobs/.onym-backup-volume ] || [ ! -f /data/.onym-backup-volume ]; then
+          echo "FATAL: /blobs or /data is not on the backup block volume." >&2
+          echo "Refusing to start: the bookkeeping and the bytes it accounts" >&2
+          echo "for must live or die together, and writing either to the root" >&2
+          echo "filesystem loses that." >&2
+          echo "On the droplet: mount /mnt/onym-backup, then check both" >&2
+          echo "sentinels and ownership — see README 'Capacity'." >&2
           exit 1
         fi
         exec onym-backup-operator
-    # Cleared so the image's CMD is not appended as an argument to the
-    # guard above.
-    command: []
     # Modest: the service streams chunks rather than buffering them, and
     # holds no large working set. SQLite's page cache is the only thing
     # here that grows with use.
     mem_limit: 256m
     volumes:
-      # Bookkeeping — which snapshots exist, under which terms, and
-      # every erasure receipt issued. Small, and losing it strands the
-      # bytes: a blob with no row is swept as an orphan.
-      - backup-data:/data
-      # The sealed snapshots themselves, on a block volume mounted at
-      # /mnt/onym-backup-blobs. A bind mount rather than a named volume
-      # precisely so this cannot silently land on the root filesystem —
-      # deploy.sh refuses to deploy if that path is not a mountpoint.
+      # **Rows and bytes on the same volume, deliberately.**
       #
-      # This is the only copy of anyone's backup. It is not backed up
-      # by anything here, and that is a gap someone must close before
-      # a person who is not a tester relies on it.
-      - /mnt/onym-backup-blobs:/blobs
+      # The bookkeeping was a named volume on the root disk while the
+      # snapshots were on the block volume, and that is a data-loss
+      # bug rather than an untidiness. The operator reconciles before
+      # serving, and reconciliation deletes bytes no row accounts for —
+      # so a droplet rebuild that re-attaches the block volume, or a
+      # `docker compose down -v`, hands a fresh database to a populated
+      # volume and the first boot erases every retained snapshot. For
+      # the only copy of anyone's backup.
+      #
+      # Separated into two directories rather than one so the blob root
+      # contains nothing but shard directories: the sweep walks
+      # <shard>/<handle>/<digest>, and a sibling `state/` inside it
+      # would be a directory the walk has to be trusted to ignore.
+      - /mnt/onym-backup/state:/data
+      - /mnt/onym-backup/blobs:/blobs
     networks: [internal]
 
 volumes:
   moderation-android-data:
-  backup-data:
   caddy-data:
   caddy-config:
   strfry-data:
