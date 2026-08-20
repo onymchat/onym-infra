@@ -11,6 +11,7 @@ via Docker Compose:
 | **relayer** | `relayer.onym.app` | Soroban contract relayer (git submodule → [`onym-relayer`](https://github.com/onymchat/onym-relayer)) |
 | **moderation** | `moderation.onym.app` | moderation enforcement backend — holds the Apple DeviceCheck key and is the only thing that can mark a device (git submodule → [`onym-moderation`](https://github.com/onymchat/onym-moderation), `apple/`) |
 | **authority** | `authority.onym.app` | moderation authority — opens and decides cases and signs verdicts, with no Apple credentials and no way to mark a device itself (same submodule, `authority/`) |
+| **backup** | `backup.onym.app` | device-backup retention operator — holds sealed snapshots and cannot read them (git submodule → [`onym-backup`](https://github.com/onymchat/onym-backup)) |
 | *(static)* | `discovery.onym.app` | Onym Discovery provider — a signed static tree under `/var/www/discovery`, served by Caddy's `file_server`. No container; the artifacts are published by [`onym-discovery`](https://github.com/onymchat/onym-discovery)'s Deploy workflow (see [The discovery static seat](#the-discovery-static-seat)) |
 
 The two moderation services are one seat split in half on purpose: the
@@ -55,6 +56,7 @@ cp .env.example .env                        # DO_API_KEY, CF_API_TOKEN, hosts, s
 cp relayer.env.example relayer.env          # RELAYER_SECRET_KEY (required), RELAYER_AUTH_TOKENS...
 cp moderation.env.example moderation.env    # DeviceCheck key + ids, interface signing seed...
 cp authority.env.example authority.env      # signing seed + admin token (required), API token...
+cp backup.env.example backup.env            # BACKUP_SIGNING_SEED (required) — read what it says about losing it
 
 ./deploy/digitalocean/deploy.sh
 ```
@@ -298,6 +300,49 @@ sequence**. The same holds for `relayer.onym.app/manifest.json`. After
 such a deploy, run the onym-discovery publish runbook (its README:
 "Each publish").
 
+## The device-backup seat
+
+`backup.onym.app` runs [`onym-backup`](https://github.com/onymchat/onym-backup),
+the retention operator for the device-backup seat. It holds sealed
+snapshots and **cannot read them**: every snapshot arrives encrypted
+under a key derived from the holder's BIP39 recovery phrase, and no code
+path in the service can open one. That is the absence of a capability
+rather than a promise about conduct, which is why it can sit on this box
+without widening what the box knows about anyone.
+
+It runs in **free mode**: `BACKUP_ENTITLEMENT_ISSUERS` is unset, so the
+operator never returns `402` and never consults an entitlement. Nothing
+issues a `SeatEntitlement` yet, so a charging operator would refuse
+every upload with a refusal no client could clear. Turning it on later
+needs the issuers, a revocation URL and an offer id together — the
+operator refuses to boot with issuers and no revocation URL (a refunded
+entitlement would keep working until it expired) or with no offers (a
+`402` naming no offer tells a client to buy something without saying
+what).
+
+**`BACKUP_SIGNING_SEED` is not like the other seeds.** The moderation
+seeds sign verdicts, and losing one invalidates future signatures.
+This one is pinned by every client that consents to the operator: the
+manifest they pinned carries the public key derived from it, every
+retained snapshot pins a terms document signed with it, and every
+erasure receipt a holder holds verifies against it. Regenerate it and
+the operator becomes, to everyone already enrolled, a different
+operator wearing the same hostname — and there is no route that repairs
+that, because reassigning a snapshot's holder is precisely the
+capability this seat is built not to have. Back it up out of band.
+
+**The blob volume is the only copy of anyone's backup**, and nothing
+here backs it up. That gap has to close before anyone who is not a
+tester relies on this. See "Capacity" for why it is a separate volume.
+
+**Being listed is a separate step.** A client can only reach an
+operator it has a pinned consent record for, and those come from a
+signed discovery catalog entry — so deploying this makes the operator
+reachable, not discoverable. The entry goes in the `onym-services`
+catalog published by the onym-discovery repo, whose provider manifest
+must also list `storage.backup` in its `seatTypes` or clients filter
+the catalog and never see it.
+
 ## Deploy via GitHub Actions
 
 `.github/workflows/deploy.yml` runs the same `deploy.sh` from CI
@@ -429,11 +474,13 @@ permanent and forecloses ever scaling back down. Disk is not the
 constraint here, so the 50 GB carries over unchanged.
 
 Because the limits below are budgeted for 4G, **resize before or with
-the deploy that lands them** — 3008M of caps on a 2G box will start
+the deploy that lands them** — 3264M of caps on a 2G box will start
 killing containers.
 
-Every service now carries a `mem_limit` (3008M capped of 4G, leaving
-~1.0G for the host and page cache). The point is blast radius, not
+Every service now carries a `mem_limit` (3264M capped of 4G, leaving
+~832M for the host and page cache — the backup operator's 256M came
+out of that headroom, since it streams chunks rather than buffering
+them and holds no large working set). The point is blast radius, not
 efficiency: with no limits, an unbounded relay response lets the
 kernel's OOM killer choose the victim, and it may well choose the
 authority — silently undoing the authority/interface separation of
@@ -452,11 +499,73 @@ What actually constrains this box, in the order it will bite:
    `reqMonitor` matches each new event against every open subscription,
    so both scale with connections rather than cores. `numThreads` is
    sized to the 2 vCPUs rather than to strfry's 3/3/3/2 defaults.
-3. **Disk.** Not a constraint and won't be. ~35k events stored at
-   ~1–2 KB each is well under 100 MB; even a *sustained* 800 events/day
-   (the 2026-08-16 incident peak, as an everyday rate) is ~450 MB/yr
-   against a 50 GB SSD. Retention policy should never be argued from
-   disk here — see below for what it is actually for.
+3. **Disk, on the root filesystem.** Still not a constraint, and the
+   reasoning is unchanged: ~35k events at ~1–2 KB each is well under
+   100 MB, and even a *sustained* 800 events/day (the 2026-08-16
+   incident peak, as an everyday rate) is ~450 MB/yr against 50 GB.
+   Relay retention should never be argued from disk here — see below
+   for what it is actually for.
+4. **Disk, on the backup volume.** This one is a constraint, and it is
+   new. Sealed snapshots are the only thing on this box measured in
+   gigabytes, and the operator's own defaults would allow 6 GiB per
+   holder (2 GiB x 3). They are held at 256 MiB x 2 here and live on a
+   **separate block volume** at `/mnt/onym-backup`, bind-mounted into
+   the container.
+
+   **The bookkeeping lives on that volume too**, at
+   `/mnt/onym-backup/state`, and that is a correctness requirement
+   rather than tidiness. The operator reconciles before it serves, and
+   reconciliation deletes bytes no row accounts for. With the SQLite
+   store on the root disk, a droplet rebuild that re-attached the block
+   volume — or a `docker compose down -v` — would hand a fresh database
+   to a populated volume, and the first boot would erase every retained
+   snapshot. Rows and bytes have to live or die together.
+
+   Two directories rather than one, so the blob root contains nothing
+   but shard directories: the sweep walks `<shard>/<handle>/<digest>`,
+   and a sibling `state/` inside it would be a directory the walk has
+   to be trusted to ignore.
+
+   The separation is the point. On the root filesystem those bytes
+   would share 50 GB with strfry's database and both moderation
+   stores, and a full disk there is not "backup is unavailable" — it is
+   the authority unable to record a verdict and the relay unable to
+   accept an event. That is the blast-radius argument the `mem_limit`s
+   make, applied to the one resource that had no limit.
+
+   `deploy.sh` refuses to deploy if that path is not a mountpoint. It
+   does **not** create or format the volume: attaching one is cheap to
+   automate, formatting is one-way, and a script that runs `mkfs`
+   against whatever is at that path will eventually destroy someone's
+   snapshots. The commands are in the failure message, and the
+   destructive step stays in a human's hands — the same posture as the
+   droplet resize above.
+
+   **A deploy-time check is not enough, because the dangerous path is a
+   reboot.** The fstab entry uses `nofail`, so a box whose volume does
+   not come back still boots; Docker starts, `restart: unless-stopped`
+   brings the operator back, and the bind mount resolves to the bare
+   directory on the root filesystem. Snapshots would be acknowledged,
+   written there, and then shadowed the moment the volume mounted
+   later — the operator reporting `retained` for bytes nobody can
+   reach.
+
+   So each bound directory carries a **sentinel file**,
+   `.onym-backup-volume`, and the container refuses to start unless
+   both are present. They live inside the volume, so they are absent
+   exactly when the mount is. The check is in
+   the container rather than in `docker.service` deliberately: a
+   `RequiresMountsFor` drop-in would let a backup volume problem refuse
+   to start the relay and the authority too, which inverts the
+   blast-radius argument this whole separation exists to make. A
+   restart loop on one container is visible, contained, and writes
+   nothing.
+
+   The volume also needs `chown -R 10001:10001` — the operator runs
+   unprivileged, and a root-owned mount leaves it unable to write.
+   `deploy.sh` diagnoses an absent mount and an unprepared one
+   separately, because they fail for different reasons and have
+   different fixes, and prints the exact commands for each.
 
 The strfry image is **pinned** (`dockurr/strfry:1.1.1`). It was
 `:latest`, which had drifted: the running container was 1.1.0 while

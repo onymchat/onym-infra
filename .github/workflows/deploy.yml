@@ -28,6 +28,14 @@ name: Deploy
 #                                    human decision and appeal panel at /admin
 #   MODERATION_AUDIT_TOKEN           (optional) bearer token for GET /v1/write-log
 #
+# Backup SECRET:
+#   BACKUP_SIGNING_SEED   64 hex chars (openssl rand -hex 32). Generate ONCE and
+#                         back it up out of band. Unlike the moderation seeds,
+#                         clients PIN the public key derived from this one:
+#                         regenerating it makes the operator a different operator
+#                         to every enrolled device, breaking consent records and
+#                         every erasure receipt already issued, with no repair path.
+#
 # Android moderation SECRETS (the Play Integrity sibling — a separate
 # interface with its own credentials; see moderation-android.env.example):
 #   MODERATION_PLAY_SA_KEY_JSON      Google Cloud service-account JSON key of the
@@ -155,6 +163,7 @@ jobs:
           AUTHORITY_SIGNING_SEED: ${{ secrets.AUTHORITY_SIGNING_SEED }}
           AUTHORITY_MODERATOR_TOKEN: ${{ secrets.AUTHORITY_MODERATOR_TOKEN }}
           AUTHORITY_ADMIN_TOKEN: ${{ secrets.AUTHORITY_ADMIN_TOKEN }}
+          BACKUP_SIGNING_SEED: ${{ secrets.BACKUP_SIGNING_SEED }}
         run: |
           cat > .env <<EOF
           DO_API_KEY=$DO_API_KEY
@@ -167,6 +176,10 @@ jobs:
           MODERATION_ANDROID_HOST=${{ vars.MODERATION_ANDROID_HOST || 'moderation-android.onym.app' }}
           AUTHORITY_HOST=${{ vars.AUTHORITY_HOST || 'authority.onym.app' }}
           DISCOVERY_HOST=${{ vars.DISCOVERY_HOST || 'discovery.onym.app' }}
+          BACKUP_HOST=${{ vars.BACKUP_HOST || 'backup.onym.app' }}
+          BACKUP_COMPONENT_ID=${{ vars.BACKUP_COMPONENT_ID || 'onym:component:onym-backup' }}
+          BACKUP_MAX_SNAPSHOT_BYTES=${{ vars.BACKUP_MAX_SNAPSHOT_BYTES || '268435456' }}
+          BACKUP_MAX_SNAPSHOTS=${{ vars.BACKUP_MAX_SNAPSHOTS || '2' }}
           MODERATION_DEVICECHECK_ENV=${{ vars.MODERATION_DEVICECHECK_ENV || 'production' }}
           MODERATION_ENFORCE_SIGNATURES=${{ vars.MODERATION_ENFORCE_SIGNATURES || 'true' }}
           MODERATION_INTERFACE_KEY_EPOCHS=${{ vars.MODERATION_INTERFACE_KEY_EPOCHS }}
@@ -189,6 +202,24 @@ jobs:
           cat > relayer.env <<EOF
           RELAYER_SECRET_KEY=$RELAYER_SECRET_KEY
           RELAYER_AUTH_TOKENS=$RELAYER_AUTH_TOKENS
+          EOF
+
+          # An unset backup seed would fail deploy.sh's shape check, but
+          # the message would be about a missing file rather than a
+          # missing secret. More importantly: this seed must be the SAME
+          # on every deploy forever. Clients pin the public key derived
+          # from it, so a run that quietly generated one would hand
+          # every enrolled device a different operator on the same
+          # hostname, with no route back.
+          if [ -z "$BACKUP_SIGNING_SEED" ]; then
+            echo "::error::BACKUP_SIGNING_SEED secret is not set. Generate it ONCE (openssl rand -hex 32), store it as a repository secret, and back it up out of band — regenerating it breaks every consent record and every erasure receipt already issued."
+            exit 1
+          fi
+          # Entitlement issuers, the revocation URL and offers are
+          # deliberately absent: free mode, because nothing issues a
+          # SeatEntitlement yet. See backup.env.example.
+          cat > backup.env <<EOF
+          BACKUP_SIGNING_SEED=$BACKUP_SIGNING_SEED
           EOF
 
           # The .p8 goes in on one line: apple/src/config.rs reads
