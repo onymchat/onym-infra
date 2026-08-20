@@ -4,3 +4,6 @@
 [submodule "moderation"]
 	path = moderation
 	url = https://github.com/onymchat/onym-moderation.git
+[submodule "backup"]
+	path = backup
+	url = https://github.com/onymchat/onym-backup.git

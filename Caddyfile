@@ -91,6 +91,25 @@
 	reverse_proxy authority:8080
 }
 
+# Device-backup retention operator. Plain JSON plus two byte streams:
+# chunk uploads (PUT) and snapshot downloads (GET). No request_body
+# override — the operator caps a JSON body at 256 KiB and a chunk at
+# whatever the grant it issued allows, and those are the limits that
+# should win. A Caddy-side cap would refuse a chunk the operator had
+# already promised to accept.
+#
+# No `encode` either. Every large body here is sealed ciphertext, which
+# does not compress, so negotiating it would cost CPU on both ends to
+# ship the same bytes. The small JSON responses are not worth a
+# per-response exception.
+#
+# `/manifest.json`, `/manifest.json.sig`, `/profile.json` and
+# `/terms/*` are all served by the operator itself, so unlike the
+# authority above this vhost needs no file routing of its own.
+{$BACKUP_HOST} {
+	reverse_proxy backup:8080
+}
+
 # Onym Discovery provider — a static, signed directory tree published
 # by the onym-discovery repo's Deploy workflow into /var/www/discovery
 # on this droplet (mounted at /srv/discovery below in compose). This

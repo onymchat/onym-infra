@@ -17,6 +17,7 @@
 #   cp moderation.env.example moderation.env && $EDITOR moderation.env  # DeviceCheck key, seed, ...
 #   cp moderation-android.env.example moderation-android.env && $EDITOR moderation-android.env  # Play SA key, seed, ...
 #   cp authority.env.example authority.env && $EDITOR authority.env     # signing seed, tokens, ...
+#   cp backup.env.example backup.env && $EDITOR backup.env               # BACKUP_SIGNING_SEED
 #   ./deploy/digitalocean/deploy.sh
 #
 set -euo pipefail
@@ -28,6 +29,7 @@ RELAYER_ENV="$REPO_ROOT/relayer.env"
 MODERATION_ENV="$REPO_ROOT/moderation.env"
 MODERATION_ANDROID_ENV="$REPO_ROOT/moderation-android.env"
 AUTHORITY_ENV="$REPO_ROOT/authority.env"
+BACKUP_ENV="$REPO_ROOT/backup.env"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 info()  { echo -e "${CYAN}==> $*${NC}"; }
@@ -49,6 +51,15 @@ grep -q '^RELAYER_SECRET_KEY=S' "$RELAYER_ENV" || { err "relayer.env: RELAYER_SE
 [ -f "$MODERATION_ENV" ] || { err "Missing $MODERATION_ENV — copy moderation.env.example and fill it in."; exit 1; }
 grep -qE '^MODERATION_INTERFACE_SIGNING_SEED=[0-9a-fA-F]{64}$' "$MODERATION_ENV" \
     || { err "moderation.env: MODERATION_INTERFACE_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
+# The backup operator refuses to boot without its seed too — and this
+# one is worse to get wrong than the moderation seeds. A client that
+# consents to this operator pins the public key derived from it, so
+# regenerating it makes the operator a different operator to everyone
+# already enrolled, with no route that repairs it.
+[ -f "$BACKUP_ENV" ] || { err "Missing $BACKUP_ENV — copy backup.env.example and set BACKUP_SIGNING_SEED."; exit 1; }
+grep -qE '^BACKUP_SIGNING_SEED=[0-9a-fA-F]{64}$' "$BACKUP_ENV" \
+    || { err "backup.env: BACKUP_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
+
 [ -f "$MODERATION_ANDROID_ENV" ] || { err "Missing $MODERATION_ANDROID_ENV — copy moderation-android.env.example and fill it in."; exit 1; }
 grep -qE '^MODERATION_INTERFACE_SIGNING_SEED=[0-9a-fA-F]{64}$' "$MODERATION_ANDROID_ENV" \
     || { err "moderation-android.env: MODERATION_INTERFACE_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
@@ -116,6 +127,7 @@ grep -qE '^AUTHORITY_INTERFACE_ROUTES=.*onym:component:onym-android=https://[^|,
 : "${MODERATION_ANDROID_HOST:?set MODERATION_ANDROID_HOST in .env}"
 : "${AUTHORITY_HOST:?set AUTHORITY_HOST in .env}"
 : "${DISCOVERY_HOST:?set DISCOVERY_HOST in .env}"
+: "${BACKUP_HOST:?set BACKUP_HOST in .env}"
 : "${MODERATION_ENFORCE_SIGNATURES:?set MODERATION_ENFORCE_SIGNATURES in .env (normally true)}"
 : "${CADDY_EMAIL:?set CADDY_EMAIL in .env}"
 [[ "$AUTHORITY_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
@@ -124,6 +136,11 @@ grep -qE '^AUTHORITY_INTERFACE_ROUTES=.*onym:component:onym-android=https://[^|,
     || { err "MODERATION_HOST must be a hostname without a scheme or path."; exit 1; }
 [[ "$MODERATION_ANDROID_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
     || { err "MODERATION_ANDROID_HOST must be a hostname without a scheme or path."; exit 1; }
+# The operator builds BACKUP_PUBLIC_URL from this and publishes it in a
+# signed manifest that clients bind to, so a scheme or path here would
+# be advertised to every enrolled device.
+[[ "$BACKUP_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
+    || { err "BACKUP_HOST must be a hostname without a scheme or path."; exit 1; }
 DO_REGION="${DO_REGION:-ams3}"
 # Seven containers, and strfry alone wants CPU for secp256k1 verification
 # on every ingest plus per-subscription matching of every new event. The
@@ -151,7 +168,7 @@ SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 SSH_KEY_PATH="${SSH_KEY_PATH/#\~/$HOME}"
 # This array drives both the Cloudflare A records and the post-deploy
 # health checks, so a host that is missing here silently gets neither.
-HOSTS=("$NOSTR_HOST" "$BLOSSOM_HOST" "$RELAYER_HOST" "$MODERATION_HOST" "$MODERATION_ANDROID_HOST" "$AUTHORITY_HOST" "$DISCOVERY_HOST")
+HOSTS=("$NOSTR_HOST" "$BLOSSOM_HOST" "$RELAYER_HOST" "$MODERATION_HOST" "$MODERATION_ANDROID_HOST" "$AUTHORITY_HOST" "$DISCOVERY_HOST" "$BACKUP_HOST")
 
 save_env() {
     # Rewrite only the droplet identity this run resolved, preserving
@@ -224,7 +241,7 @@ DOCR_HOST="registry.digitalocean.com"
 # credential by going stale rather than by anyone remembering to revoke.
 DOCR_CRED_TTL="${DOCR_CRED_TTL:-2592000}"   # 30 days
 BUILDX_BUILDER="onym-infra"
-RELAYER_IMAGE=""; MODERATION_IMAGE=""; MODERATION_ANDROID_IMAGE=""; AUTHORITY_IMAGE=""
+RELAYER_IMAGE=""; MODERATION_IMAGE=""; MODERATION_ANDROID_IMAGE=""; AUTHORITY_IMAGE=""; BACKUP_IMAGE=""
 
 # <image-name> <build-context> -> a registry ref tagged with the commit
 # of the submodule that context lives in.
@@ -296,10 +313,12 @@ if [ -n "$DOCR_NAME" ]; then
     MODERATION_IMAGE="$(image_ref moderation-apple moderation/apple)"
     MODERATION_ANDROID_IMAGE="$(image_ref moderation-android moderation/android)"
     AUTHORITY_IMAGE="$(image_ref moderation-authority moderation/authority)"
+    BACKUP_IMAGE="$(image_ref backup backup)"
     ensure_image "$RELAYER_IMAGE"            relayer
     ensure_image "$MODERATION_IMAGE"         moderation/apple
     ensure_image "$MODERATION_ANDROID_IMAGE" moderation/android
     ensure_image "$AUTHORITY_IMAGE"          moderation/authority
+    ensure_image "$BACKUP_IMAGE"             backup
     ok "Images ready"
 else
     warn "DOCR_NAME unset — building on the droplet. See README: Container images."
@@ -427,6 +446,10 @@ MODERATION_HOST=$MODERATION_HOST
 MODERATION_ANDROID_HOST=$MODERATION_ANDROID_HOST
 AUTHORITY_HOST=$AUTHORITY_HOST
 DISCOVERY_HOST=$DISCOVERY_HOST
+BACKUP_HOST=$BACKUP_HOST
+BACKUP_COMPONENT_ID=${BACKUP_COMPONENT_ID:-onym:component:onym-backup}
+BACKUP_MAX_SNAPSHOT_BYTES=${BACKUP_MAX_SNAPSHOT_BYTES:-268435456}
+BACKUP_MAX_SNAPSHOTS=${BACKUP_MAX_SNAPSHOTS:-2}
 MODERATION_DEVICECHECK_ENV=${MODERATION_DEVICECHECK_ENV:-production}
 MODERATION_ENFORCE_SIGNATURES=$MODERATION_ENFORCE_SIGNATURES
 MODERATION_INTERFACE_KEY_EPOCHS=${MODERATION_INTERFACE_KEY_EPOCHS:-}
@@ -447,11 +470,13 @@ RELAYER_IMAGE=$RELAYER_IMAGE
 MODERATION_IMAGE=$MODERATION_IMAGE
 MODERATION_ANDROID_IMAGE=$MODERATION_ANDROID_IMAGE
 AUTHORITY_IMAGE=$AUTHORITY_IMAGE
+BACKUP_IMAGE=$BACKUP_IMAGE
 EOF
 scp "${SSH_OPTS[@]}" "$RELAYER_ENV" "root@$DROPLET_IP:/opt/onym-infra/relayer.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$MODERATION_ENV" "root@$DROPLET_IP:/opt/onym-infra/moderation.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$MODERATION_ANDROID_ENV" "root@$DROPLET_IP:/opt/onym-infra/moderation-android.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$AUTHORITY_ENV" "root@$DROPLET_IP:/opt/onym-infra/authority.env" >/dev/null
+scp "${SSH_OPTS[@]}" "$BACKUP_ENV" "root@$DROPLET_IP:/opt/onym-infra/backup.env" >/dev/null
 
 ssh_do "mkdir -p /opt/onym-infra/runtime/authority-manifest"
 
@@ -462,6 +487,49 @@ ssh_do "mkdir -p /opt/onym-infra/runtime/authority-manifest"
 # valid degraded state) rather than depending on Docker to invent the
 # directory. Nothing in this repo ever writes INTO it.
 ssh_do "mkdir -p /var/www/discovery"
+
+# The backup operator's blob root must be a real mount, and this
+# refuses to deploy if it is not.
+#
+# Sealed snapshots are the only thing on this box measured in
+# gigabytes. On the root filesystem they would share 50 GB with
+# strfry's event database and both moderation stores — and a full disk
+# there is not "backup is unavailable", it is the authority unable to
+# record a verdict and the relay unable to accept an event. That is the
+# same blast-radius argument the compose memory limits make, applied to
+# the one resource that had no limit.
+#
+# Deliberately NOT provisioned here. Creating and attaching a volume is
+# cheap to automate; formatting one is a one-way operation, and a
+# script that runs mkfs against whatever is at that path is a script
+# that will eventually destroy someone's snapshots. Same posture as the
+# droplet resize above: the destructive step stays in a human's hands.
+info "Checking the backup blob volume..."
+if ! ssh_do "mountpoint -q /mnt/onym-backup-blobs"; then
+    err "/mnt/onym-backup-blobs is not a mountpoint on the droplet."
+    err ""
+    err "The backup operator stores sealed snapshots there, and it must"
+    err "not be the root filesystem — filling that takes the relay and"
+    err "the authority down with it."
+    err ""
+    err "Create and attach a volume (once), then format and mount it:"
+    err "  doctl compute volume create onym-backup-blobs \\"
+    err "      --region $DO_REGION --size 100GiB --fs-type ext4"
+    err "  doctl compute volume-action attach <VOLUME_ID> ${DROPLET_ID:-<DROPLET_ID>} --wait"
+    err ""
+    err "Then on the droplet, having checked the device is the new,"
+    err "EMPTY volume — mkfs on the wrong one is unrecoverable:"
+    err "  lsblk"
+    err "  mkdir -p /mnt/onym-backup-blobs"
+    err "  mount -o discard,defaults /dev/disk/by-id/scsi-0DO_Volume_onym-backup-blobs \\"
+    err "      /mnt/onym-backup-blobs"
+    err "  echo '/dev/disk/by-id/scsi-0DO_Volume_onym-backup-blobs /mnt/onym-backup-blobs ext4 defaults,nofail,discard 0 2' >> /etc/fstab"
+    err ""
+    err "--fs-type ext4 formats at creation, so the mkfs step is only"
+    err "needed for a volume created without it."
+    exit 1
+fi
+ok "  /mnt/onym-backup-blobs is mounted"
 
 NO_BUILD=""
 if [ -n "$DOCR_NAME" ]; then

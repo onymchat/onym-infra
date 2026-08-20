@@ -41,7 +41,7 @@ name: onym-infra
 # IS the cap. A relay that gets killed and restarts is a far better
 # outcome than one that takes the authority with it.
 #
-# Budgeted for s-2vcpu-4gb: 3008M capped, leaving ~1.0G for the host,
+# Budgeted for s-2vcpu-4gb: 3264M capped, leaving ~832M for the host,
 # dockerd and page cache. Revisit these together if the droplet resizes.
 services:
   caddy:
@@ -62,6 +62,7 @@ services:
       - MODERATION_ANDROID_HOST=${MODERATION_ANDROID_HOST:-moderation-android.onym.app}
       - AUTHORITY_HOST=${AUTHORITY_HOST:-authority.onym.app}
       - DISCOVERY_HOST=${DISCOVERY_HOST:-discovery.onym.app}
+      - BACKUP_HOST=${BACKUP_HOST:-backup.onym.app}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # The authority's published policy documents, served under
@@ -89,7 +90,7 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     networks: [internal]
-    depends_on: [nostr-relay, blossom, relayer, moderation, moderation-android, authority]
+    depends_on: [nostr-relay, blossom, relayer, moderation, moderation-android, authority, backup]
 
   nostr-relay:
     # Pinned deliberately. This was `:latest`, which had drifted — the
@@ -333,8 +334,67 @@ services:
       - ./runtime/authority-manifest:/manifest:ro
     networks: [internal]
 
+  # The device-backup retention operator. It holds sealed snapshots and
+  # cannot read them: every snapshot arrives encrypted under a key
+  # derived from the holder's BIP39 recovery phrase, and no code path in
+  # the service can open one. That is the absence of a capability rather
+  # than a promise about conduct, which is why this service can sit
+  # beside the others without widening what this box knows.
+  #
+  # Free mode: BACKUP_ENTITLEMENT_ISSUERS is deliberately unset, so the
+  # operator never returns 402 and never consults an entitlement.
+  # Nothing issues a SeatEntitlement yet, so a charging operator would
+  # refuse every upload with a refusal no client could clear.
+  backup:
+    image: ${BACKUP_IMAGE:-onym-infra-backup:local}
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # BACKUP_SIGNING_SEED lives in backup.env — never committed. See
+    # backup.env.example, and read what it says about losing it.
+    env_file: ./backup.env
+    environment:
+      # Bind on all interfaces inside the container so Caddy can reach
+      # it; the port is NOT published to the host.
+      - BACKUP_BIND=0.0.0.0:8080
+      - BACKUP_COMPONENT_ID=${BACKUP_COMPONENT_ID:-onym:component:onym-backup}
+      # The origin the manifest publishes and clients bind to. Derived
+      # from BACKUP_HOST so what is advertised cannot drift from where
+      # it is served.
+      - BACKUP_PUBLIC_URL=https://${BACKUP_HOST:-backup.onym.app}
+      - BACKUP_STORE_PATH=/data/backup.sqlite
+      - BACKUP_BLOB_ROOT=/blobs
+      # Sized far below the operator's own defaults (2 GiB x 3), and
+      # for the block volume rather than for what a holder would want.
+      # Raising these is a capacity decision about that volume, not a
+      # product one — see README "Capacity".
+      - BACKUP_MAX_SNAPSHOT_BYTES=${BACKUP_MAX_SNAPSHOT_BYTES:-268435456}
+      - BACKUP_MAX_SNAPSHOTS=${BACKUP_MAX_SNAPSHOTS:-2}
+      - RUST_LOG=${RUST_LOG:-info}
+    # Modest: the service streams chunks rather than buffering them, and
+    # holds no large working set. SQLite's page cache is the only thing
+    # here that grows with use.
+    mem_limit: 256m
+    volumes:
+      # Bookkeeping — which snapshots exist, under which terms, and
+      # every erasure receipt issued. Small, and losing it strands the
+      # bytes: a blob with no row is swept as an orphan.
+      - backup-data:/data
+      # The sealed snapshots themselves, on a block volume mounted at
+      # /mnt/onym-backup-blobs. A bind mount rather than a named volume
+      # precisely so this cannot silently land on the root filesystem —
+      # deploy.sh refuses to deploy if that path is not a mountpoint.
+      #
+      # This is the only copy of anyone's backup. It is not backed up
+      # by anything here, and that is a gap someone must close before
+      # a person who is not a tester relies on it.
+      - /mnt/onym-backup-blobs:/blobs
+    networks: [internal]
+
 volumes:
   moderation-android-data:
+  backup-data:
   caddy-data:
   caddy-config:
   strfry-data:
