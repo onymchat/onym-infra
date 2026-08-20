@@ -533,13 +533,26 @@ What actually constrains this box, in the order it will bite:
    accept an event. That is the blast-radius argument the `mem_limit`s
    make, applied to the one resource that had no limit.
 
-   `deploy.sh` refuses to deploy if that path is not a mountpoint. It
-   does **not** create or format the volume: attaching one is cheap to
-   automate, formatting is one-way, and a script that runs `mkfs`
-   against whatever is at that path will eventually destroy someone's
-   snapshots. The commands are in the failure message, and the
-   destructive step stays in a human's hands — the same posture as the
-   droplet resize above.
+   `deploy.sh` refuses to deploy if that path is not a prepared
+   mountpoint, and `deploy/digitalocean/provision-volume.sh` — or the
+   **Provision backup volume** workflow — is what satisfies it. Both are
+   idempotent: rerunning changes nothing once the volume is in place.
+
+   **Provisioning never runs `mkfs`.** The only formatting is
+   `doctl compute volume create --fs-type ext4`, which formats a volume
+   at the moment it is created, when it is definitionally empty. A
+   volume that already exists is mounted, never reformatted; one that
+   exists with no filesystem is refused rather than repaired, and one
+   attached to a different droplet is reported rather than moved. A
+   provisioning script that can format a populated volume will
+   eventually delete someone's only copy of their backup, and it will do
+   it on a rerun that looked routine.
+
+   Provisioning is a separate workflow from Deploy on purpose. Deploy is
+   routine and frequent; this touches storage nobody has a second copy
+   of, and a workflow you run rarely is one you read before running.
+   Forgetting it is safe — Deploy fails closed at the gate rather than
+   writing snapshots to the root disk.
 
    **A deploy-time check is not enough, because the dangerous path is a
    reboot.** The fstab entry uses `nofail`, so a box whose volume does

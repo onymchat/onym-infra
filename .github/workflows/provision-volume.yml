@@ -1,0 +1,64 @@
+name: Provision backup volume
+
+# Creates, attaches, mounts and prepares the device-backup block volume.
+# Manual trigger, and idempotent: rerunning it changes nothing once the
+# volume is in place.
+#
+# Separate from Deploy on purpose. Deploy is a routine, frequent action;
+# this touches storage that holds the only copy of anyone's backup, and
+# a workflow you run rarely is one you read before running. Deploy still
+# refuses to proceed unless the volume is prepared, so forgetting this
+# fails loudly rather than silently writing snapshots to the root disk.
+#
+# It never runs mkfs. The only formatting is `doctl volume create
+# --fs-type ext4`, which formats a volume at creation, when it is
+# definitionally empty. An existing volume is mounted, never
+# reformatted.
+#
+# Required repository SECRETS:
+#   DO_API_KEY        DigitalOcean API token
+#   SSH_PRIVATE_KEY   the key the droplet trusts (same one Deploy uses)
+#
+# Optional repository VARIABLES:
+#   DO_REGION              default ams3
+#   DROPLET_ID             skips the lookup by name
+#   BACKUP_VOLUME_NAME     default onym-backup
+#   BACKUP_VOLUME_SIZE     default 100GiB
+#   BACKUP_VOLUME_MOUNT    default /mnt/onym-backup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DO_API_KEY }}
+
+      - name: Load SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Provision the volume
+        env:
+          DO_API_KEY: ${{ secrets.DO_API_KEY }}
+          DO_REGION: ${{ vars.DO_REGION || 'ams3' }}
+          DROPLET_ID: ${{ vars.DROPLET_ID }}
+          BACKUP_VOLUME_NAME: ${{ vars.BACKUP_VOLUME_NAME || 'onym-backup' }}
+          BACKUP_VOLUME_SIZE: ${{ vars.BACKUP_VOLUME_SIZE || '100GiB' }}
+          BACKUP_VOLUME_MOUNT: ${{ vars.BACKUP_VOLUME_MOUNT || '/mnt/onym-backup' }}
+          SSH_KEY_PATH: /home/runner/.ssh/deploy_key
+        run: ./deploy/digitalocean/provision-volume.sh
