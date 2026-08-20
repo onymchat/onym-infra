@@ -508,9 +508,18 @@ What actually constrains this box, in the order it will bite:
 4. **Disk, on the backup volume.** This one is a constraint, and it is
    new. Sealed snapshots are the only thing on this box measured in
    gigabytes, and the operator's own defaults would allow 6 GiB per
-   holder (2 GiB x 3). They are held at 256 MiB x 2 here and live on a
+   holder (2 GiB x 3). They are held at 256 MiB x 5 here and live on a
    **separate block volume** at `/mnt/onym-backup`, bind-mounted into
-   the container.
+   the container. At that size a holder can occupy 1.25 GiB, so 100 GiB
+   carries roughly 80 of them.
+
+   The snapshot count is a **rolling window, kept by the client**: when
+   a new snapshot would exceed the limit, the client erases its oldest
+   first. The operator refuses rather than making room — it has no code
+   path that deletes a snapshot nobody asked it to delete, and that
+   absence is the seat rather than an omission. A client that does not
+   prune fills up and receives `quota_exceeded`, which is the honest
+   failure and not a silent deletion.
 
    **The bookkeeping lives on that volume too**, at
    `/mnt/onym-backup/state`, and that is a correctness requirement

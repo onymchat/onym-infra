@@ -179,7 +179,7 @@ jobs:
           BACKUP_HOST=${{ vars.BACKUP_HOST || 'backup.onym.app' }}
           BACKUP_COMPONENT_ID=${{ vars.BACKUP_COMPONENT_ID || 'onym:component:onym-backup' }}
           BACKUP_MAX_SNAPSHOT_BYTES=${{ vars.BACKUP_MAX_SNAPSHOT_BYTES || '268435456' }}
-          BACKUP_MAX_SNAPSHOTS=${{ vars.BACKUP_MAX_SNAPSHOTS || '2' }}
+          BACKUP_MAX_SNAPSHOTS=${{ vars.BACKUP_MAX_SNAPSHOTS || '5' }}
           MODERATION_DEVICECHECK_ENV=${{ vars.MODERATION_DEVICECHECK_ENV || 'production' }}
           MODERATION_ENFORCE_SIGNATURES=${{ vars.MODERATION_ENFORCE_SIGNATURES || 'true' }}
           MODERATION_INTERFACE_KEY_EPOCHS=${{ vars.MODERATION_INTERFACE_KEY_EPOCHS }}
