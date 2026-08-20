@@ -372,6 +372,39 @@ services:
       - BACKUP_MAX_SNAPSHOT_BYTES=${BACKUP_MAX_SNAPSHOT_BYTES:-268435456}
       - BACKUP_MAX_SNAPSHOTS=${BACKUP_MAX_SNAPSHOTS:-2}
       - RUST_LOG=${RUST_LOG:-info}
+    # **Refuse to serve unless the block volume is really mounted.**
+    #
+    # The deploy-time `mountpoint` gate protects the deploy path and
+    # nothing else. The dangerous path is a reboot: the fstab entry uses
+    # `nofail` so the box still comes up if the volume does not, Docker
+    # starts, `restart: unless-stopped` brings this container back, and
+    # the bind mount resolves to the bare directory on the ROOT
+    # filesystem. Snapshots would be acknowledged, written there, and
+    # then shadowed the moment the volume mounted later — the operator
+    # reporting `retained` for bytes nobody can reach, for the only copy
+    # of anyone's backup.
+    #
+    # The sentinel lives inside the volume, so it is absent exactly when
+    # the mount is. Failing here rather than in `docker.service` is
+    # deliberate: `RequiresMountsFor` would make a backup volume problem
+    # refuse to start the relay and the authority too, which inverts the
+    # blast-radius argument this separation exists to make. A restart
+    # loop on one container is visible, contained, and writes nothing.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ ! -f /blobs/.onym-backup-volume ]; then
+          echo "FATAL: /blobs is not the backup block volume (sentinel absent)." >&2
+          echo "Refusing to write sealed snapshots to the root filesystem." >&2
+          echo "On the droplet: mount /mnt/onym-backup-blobs, then check" >&2
+          echo "the sentinel and ownership — see README 'Capacity'." >&2
+          exit 1
+        fi
+        exec onym-backup-operator
+    # Cleared so the image's CMD is not appended as an argument to the
+    # guard above.
+    command: []
     # Modest: the service streams chunks rather than buffering them, and
     # holds no large working set. SQLite's page cache is the only thing
     # here that grows with use.

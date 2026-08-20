@@ -527,6 +527,29 @@ What actually constrains this box, in the order it will bite:
    destructive step stays in a human's hands — the same posture as the
    droplet resize above.
 
+   **A deploy-time check is not enough, because the dangerous path is a
+   reboot.** The fstab entry uses `nofail`, so a box whose volume does
+   not come back still boots; Docker starts, `restart: unless-stopped`
+   brings the operator back, and the bind mount resolves to the bare
+   directory on the root filesystem. Snapshots would be acknowledged,
+   written there, and then shadowed the moment the volume mounted
+   later — the operator reporting `retained` for bytes nobody can
+   reach.
+
+   So the volume carries a **sentinel file**, `.onym-backup-volume`,
+   and the container refuses to start without it. It lives inside the
+   volume, so it is absent exactly when the mount is. The check is in
+   the container rather than in `docker.service` deliberately: a
+   `RequiresMountsFor` drop-in would let a backup volume problem refuse
+   to start the relay and the authority too, which inverts the
+   blast-radius argument this whole separation exists to make. A
+   restart loop on one container is visible, contained, and writes
+   nothing.
+
+   The volume also needs `chown -R 10001:10001` — the operator runs
+   unprivileged, and a root-owned mount leaves it unable to write.
+   Both steps are in `deploy.sh`'s failure message.
+
 The strfry image is **pinned** (`dockurr/strfry:1.1.1`). It was
 `:latest`, which had drifted: the running container was 1.1.0 while
 `latest` had moved to 1.1.1, so the next pull would have changed relay

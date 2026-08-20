@@ -142,7 +142,7 @@ grep -qE '^AUTHORITY_INTERFACE_ROUTES=.*onym:component:onym-android=https://[^|,
 [[ "$BACKUP_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
     || { err "BACKUP_HOST must be a hostname without a scheme or path."; exit 1; }
 DO_REGION="${DO_REGION:-ams3}"
-# Seven containers, and strfry alone wants CPU for secp256k1 verification
+# Eight containers, and strfry alone wants CPU for secp256k1 verification
 # on every ingest plus per-subscription matching of every new event. The
 # old s-1vcpu-2gb was already at its ceiling — cloud-init below adds a
 # 2G swapfile specifically because the relayer build OOMed on it.
@@ -224,7 +224,7 @@ fi
 #
 #   unset  Legacy: sources are rsynced and built in place. It works, and
 #          it is also why this deployment cannot be more than one box —
-#          four Rust builds on a 2GB droplet, serialized so they do not
+#          five Rust builds on a 2GB droplet, serialized so they do not
 #          OOM. Nothing here is a second machine until images are built
 #          once and pulled many times.
 #
@@ -504,8 +504,14 @@ ssh_do "mkdir -p /var/www/discovery"
 # script that runs mkfs against whatever is at that path is a script
 # that will eventually destroy someone's snapshots. Same posture as the
 # droplet resize above: the destructive step stays in a human's hands.
+# The sentinel is checked as well as the mount, and the container
+# re-checks it at every start. A `nofail` fstab entry means a reboot
+# where the volume does not come back still boots the box, and a bind
+# mount onto the bare directory would put sealed snapshots on the root
+# filesystem — where they are shadowed the moment the volume mounts
+# later. `mountpoint` here only ever proves something about deploy time.
 info "Checking the backup blob volume..."
-if ! ssh_do "mountpoint -q /mnt/onym-backup-blobs"; then
+if ! ssh_do "mountpoint -q /mnt/onym-backup-blobs && test -f /mnt/onym-backup-blobs/.onym-backup-volume"; then
     err "/mnt/onym-backup-blobs is not a mountpoint on the droplet."
     err ""
     err "The backup operator stores sealed snapshots there, and it must"
@@ -524,6 +530,14 @@ if ! ssh_do "mountpoint -q /mnt/onym-backup-blobs"; then
     err "  mount -o discard,defaults /dev/disk/by-id/scsi-0DO_Volume_onym-backup-blobs \\"
     err "      /mnt/onym-backup-blobs"
     err "  echo '/dev/disk/by-id/scsi-0DO_Volume_onym-backup-blobs /mnt/onym-backup-blobs ext4 defaults,nofail,discard 0 2' >> /etc/fstab"
+    err ""
+    err "Then, INSIDE the mounted volume, the two things the container"
+    err "needs. The sentinel is how it tells a mounted volume from the"
+    err "bare directory after a reboot where the mount did not return;"
+    err "the chown is because the operator runs as uid 10001 and a"
+    err "root-owned mount would leave it unable to write:"
+    err "  touch /mnt/onym-backup-blobs/.onym-backup-volume"
+    err "  chown -R 10001:10001 /mnt/onym-backup-blobs"
     err ""
     err "--fs-type ext4 formats at creation, so the mkfs step is only"
     err "needed for a volume created without it."
@@ -545,7 +559,7 @@ if [ -n "$DOCR_NAME" ]; then
     info "Pulling images on the droplet..."
     ssh_do "cd /opt/onym-infra && docker compose pull"
 else
-    info "Building containers serially (four Rust builds; the first run takes a while)..."
+    info "Building containers serially (five Rust builds; the first run takes a while)..."
     ssh_do "cd /opt/onym-infra && COMPOSE_PARALLEL_LIMIT=1 docker compose build"
 fi
 
@@ -672,6 +686,19 @@ check "https://$DISCOVERY_HOST/manifest.json" "discovery"
 check_health "https://$MODERATION_HOST/health" "moderation" "Check: docker compose logs moderation"
 check_health "https://$MODERATION_ANDROID_HOST/health" "moderation-android" "Check: docker compose logs moderation-android"
 check_health "https://$AUTHORITY_HOST/health"  "authority"  "Check: docker compose logs authority"
+# The backup operator gets the same three checks as the authority, and
+# for the same reason: clients pin these bytes. Without them a container
+# that failed to boot — an invalid-but-well-shaped signing seed, an
+# unwritable blob root, the volume sentinel missing — deploys green,
+# and the first person to find out is a holder whose upload 502s.
+check_health "https://$BACKUP_HOST/health" "backup" \
+    "Check: docker compose logs backup (a missing volume sentinel refuses to start, by design)"
+check_health "https://$BACKUP_HOST/manifest.json" "backup manifest" \
+    "Check: docker compose logs backup"
+# Consent pins the manifest bytes; a 404 here leaves every client
+# unable to check what it agreed to against what is served.
+check_health "https://$BACKUP_HOST/manifest.json.sig" "backup manifest signature" \
+    "Check: docker compose logs backup"
 # A term nobody can read is a term nobody agreed to, so the published
 # documents are checked like a service rather than assumed. /policy/csam
 # is one of the nine the manifest links to, and the heaviest.
