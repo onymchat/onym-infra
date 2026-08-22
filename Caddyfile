@@ -48,6 +48,17 @@
 	reverse_proxy moderation-android:8080
 }
 
+# Push notification backend. Plain JSON over GET/POST — no
+# websockets inbound (its own outbound relay sockets don't pass
+# through Caddy), and the service caps bodies at 64 KiB itself. No
+# access log is configured for any site in this file, which for this
+# one is a design requirement rather than a default: the service
+# deliberately never sees or stores client IPs durably.
+{$PUSH_HOST} {
+	encode zstd gzip
+	reverse_proxy push:8080
+}
+
 # Moderation authority. It caps request bodies at 1 MiB itself (the
 # interface above uses 256 KiB). `/manifest.json` is deliberately
 # public: people have to be able to read the classes, terms and appeal
