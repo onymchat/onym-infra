@@ -59,6 +59,13 @@
 	reverse_proxy push:8080
 }
 
+# Android push backend. Same posture as its Apple sibling above —
+# plain JSON, 64 KiB body cap in the service, no access log by design.
+{$PUSH_ANDROID_HOST} {
+	encode zstd gzip
+	reverse_proxy push-android:8080
+}
+
 # Moderation authority. It caps request bodies at 1 MiB itself (the
 # interface above uses 256 KiB). `/manifest.json` is deliberately
 # public: people have to be able to read the classes, terms and appeal

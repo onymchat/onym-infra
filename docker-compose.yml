@@ -64,6 +64,7 @@ services:
       - DISCOVERY_HOST=${DISCOVERY_HOST:-discovery.onym.app}
       - BACKUP_HOST=${BACKUP_HOST:-backup.onym.app}
       - PUSH_HOST=${PUSH_HOST:-push.onym.app}
+      - PUSH_ANDROID_HOST=${PUSH_ANDROID_HOST:-push-android.onym.app}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # The authority's published policy documents, served under
@@ -91,7 +92,7 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     networks: [internal]
-    depends_on: [nostr-relay, blossom, relayer, moderation, moderation-android, authority, backup, push]
+    depends_on: [nostr-relay, blossom, relayer, moderation, moderation-android, authority, backup, push, push-android]
 
   nostr-relay:
     # Pinned deliberately. This was `:latest`, which had drifted — the
@@ -217,6 +218,36 @@ services:
       # irreplaceable: losing the volume means devices re-register on
       # their next refresh.
       - push-data:/data
+    networks: [internal]
+
+  # The Android push backend ("onym-push/google") — the FCM sibling of
+  # the `push` service above: same relay watcher, Play Integrity in
+  # place of DeviceCheck, one Google service account carrying both the
+  # Integrity and FCM scopes. Private network only, like its sibling.
+  push-android:
+    image: ${PUSH_ANDROID_IMAGE:-onym-infra-push-android:local}
+    build:
+      context: ./push/google
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    mem_limit: 256m
+    # Secrets (the Google service-account key) live in push-android.env
+    # — never committed. See push-android.env.example.
+    env_file: ./push-android.env
+    environment:
+      - PUSH_BIND=0.0.0.0:8080
+      - PUSH_STORE_PATH=/data/push.sqlite
+      - PUSH_DATA_DIR=/data
+      - PUSH_DEFAULT_RELAY=${PUSH_DEFAULT_RELAY:-wss://nostr.onym.app}
+      - PUSH_FCM_PROJECT_ID=${PUSH_FCM_PROJECT_ID:-}
+      - PUSH_PLAY_PACKAGE_NAME=${PUSH_PLAY_PACKAGE_NAME:-app.onym.android}
+      - PUSH_PLAY_CERT_SHA256_DIGESTS=${PUSH_PLAY_CERT_SHA256_DIGESTS:-}
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      # Encrypted FCM tokens, subscriptions, challenges, and the
+      # storage/envelope keys. Nothing irreplaceable: losing it means
+      # devices re-register on their next refresh.
+      - push-android-data:/data
     networks: [internal]
 
   # The Android enforcement backend — the interface for
@@ -476,6 +507,7 @@ services:
 volumes:
   moderation-android-data:
   push-data:
+  push-android-data:
   caddy-data:
   caddy-config:
   strfry-data:
