@@ -5,6 +5,7 @@ moderation.env
 moderation-android.env
 authority.env
 backup.env
+push.env
 
 # Deployment-generated public artifacts. The authority manifest is
 # materialized from the reference template plus the deployment key.

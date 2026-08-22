@@ -7,3 +7,6 @@
 [submodule "backup"]
 	path = backup
 	url = https://github.com/onymchat/onym-backup.git
+[submodule "push"]
+	path = push
+	url = https://github.com/onymchat/onym-push.git

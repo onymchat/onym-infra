@@ -28,6 +28,7 @@ ENV_FILE="$REPO_ROOT/.env"
 RELAYER_ENV="$REPO_ROOT/relayer.env"
 MODERATION_ENV="$REPO_ROOT/moderation.env"
 MODERATION_ANDROID_ENV="$REPO_ROOT/moderation-android.env"
+PUSH_ENV="$REPO_ROOT/push.env"
 AUTHORITY_ENV="$REPO_ROOT/authority.env"
 BACKUP_ENV="$REPO_ROOT/backup.env"
 
@@ -61,6 +62,12 @@ grep -qE '^BACKUP_SIGNING_SEED=[0-9a-fA-F]{64}$' "$BACKUP_ENV" \
     || { err "backup.env: BACKUP_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
 
 [ -f "$MODERATION_ANDROID_ENV" ] || { err "Missing $MODERATION_ANDROID_ENV — copy moderation-android.env.example and fill it in."; exit 1; }
+
+# The push backend boots without APNs credentials (it registers devices
+# and delivers nothing, warning loudly), so only the file's existence
+# is checked — an operator who has not filled it in yet still gets a
+# healthy deploy, just a silent one.
+[ -f "$PUSH_ENV" ] || { err "Missing $PUSH_ENV — copy push.env.example (APNs key optional, service degrades to registration-only)."; exit 1; }
 grep -qE '^MODERATION_INTERFACE_SIGNING_SEED=[0-9a-fA-F]{64}$' "$MODERATION_ANDROID_ENV" \
     || { err "moderation-android.env: MODERATION_INTERFACE_SIGNING_SEED must be 64 hex chars (openssl rand -hex 32)."; exit 1; }
 # The two interfaces are different components with different
@@ -128,6 +135,7 @@ grep -qE '^AUTHORITY_INTERFACE_ROUTES=.*onym:component:onym-android=https://[^|,
 : "${AUTHORITY_HOST:?set AUTHORITY_HOST in .env}"
 : "${DISCOVERY_HOST:?set DISCOVERY_HOST in .env}"
 : "${BACKUP_HOST:?set BACKUP_HOST in .env}"
+: "${PUSH_HOST:?set PUSH_HOST in .env}"
 : "${MODERATION_ENFORCE_SIGNATURES:?set MODERATION_ENFORCE_SIGNATURES in .env (normally true)}"
 : "${CADDY_EMAIL:?set CADDY_EMAIL in .env}"
 [[ "$AUTHORITY_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
@@ -141,6 +149,8 @@ grep -qE '^AUTHORITY_INTERFACE_ROUTES=.*onym:component:onym-android=https://[^|,
 # be advertised to every enrolled device.
 [[ "$BACKUP_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
     || { err "BACKUP_HOST must be a hostname without a scheme or path."; exit 1; }
+[[ "$PUSH_HOST" =~ ^[A-Za-z0-9.-]+$ ]] \
+    || { err "PUSH_HOST must be a hostname without a scheme or path."; exit 1; }
 DO_REGION="${DO_REGION:-ams3}"
 # Eight containers, and strfry alone wants CPU for secp256k1 verification
 # on every ingest plus per-subscription matching of every new event. The
@@ -168,7 +178,7 @@ SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_ed25519}"
 SSH_KEY_PATH="${SSH_KEY_PATH/#\~/$HOME}"
 # This array drives both the Cloudflare A records and the post-deploy
 # health checks, so a host that is missing here silently gets neither.
-HOSTS=("$NOSTR_HOST" "$BLOSSOM_HOST" "$RELAYER_HOST" "$MODERATION_HOST" "$MODERATION_ANDROID_HOST" "$AUTHORITY_HOST" "$DISCOVERY_HOST" "$BACKUP_HOST")
+HOSTS=("$NOSTR_HOST" "$BLOSSOM_HOST" "$RELAYER_HOST" "$MODERATION_HOST" "$MODERATION_ANDROID_HOST" "$AUTHORITY_HOST" "$DISCOVERY_HOST" "$BACKUP_HOST" "$PUSH_HOST")
 
 save_env() {
     # Rewrite only the droplet identity this run resolved, preserving
@@ -241,7 +251,7 @@ DOCR_HOST="registry.digitalocean.com"
 # credential by going stale rather than by anyone remembering to revoke.
 DOCR_CRED_TTL="${DOCR_CRED_TTL:-2592000}"   # 30 days
 BUILDX_BUILDER="onym-infra"
-RELAYER_IMAGE=""; MODERATION_IMAGE=""; MODERATION_ANDROID_IMAGE=""; AUTHORITY_IMAGE=""; BACKUP_IMAGE=""
+RELAYER_IMAGE=""; MODERATION_IMAGE=""; MODERATION_ANDROID_IMAGE=""; AUTHORITY_IMAGE=""; BACKUP_IMAGE=""; PUSH_IMAGE=""
 
 # <image-name> <build-context> -> a registry ref tagged with the commit
 # of the submodule that context lives in.
@@ -314,11 +324,13 @@ if [ -n "$DOCR_NAME" ]; then
     MODERATION_ANDROID_IMAGE="$(image_ref moderation-android moderation/android)"
     AUTHORITY_IMAGE="$(image_ref moderation-authority moderation/authority)"
     BACKUP_IMAGE="$(image_ref backup backup)"
+    PUSH_IMAGE="$(image_ref push push)"
     ensure_image "$RELAYER_IMAGE"            relayer
     ensure_image "$MODERATION_IMAGE"         moderation/apple
     ensure_image "$MODERATION_ANDROID_IMAGE" moderation/android
     ensure_image "$AUTHORITY_IMAGE"          moderation/authority
     ensure_image "$BACKUP_IMAGE"             backup
+    ensure_image "$PUSH_IMAGE"               push/apple
     ok "Images ready"
 else
     warn "DOCR_NAME unset — building on the droplet. See README: Container images."
@@ -424,10 +436,12 @@ rsync -az --delete \
     --exclude '.git' --exclude 'relayer/target' \
     --exclude 'moderation/apple/target' --exclude 'moderation/authority/target' \
     --exclude 'moderation/android/target' \
+    --exclude 'push/apple/target' \
     --exclude 'runtime/' \
     --exclude '.env' \
     --exclude 'relayer.env' --exclude 'moderation.env' --exclude 'moderation-android.env' \
     --exclude 'authority.env' \
+    --exclude 'push.env' \
     --exclude '*.log' --exclude '.DS_Store' \
     "$REPO_ROOT/" "root@$DROPLET_IP:/opt/onym-infra/"
 
@@ -447,6 +461,10 @@ MODERATION_ANDROID_HOST=$MODERATION_ANDROID_HOST
 AUTHORITY_HOST=$AUTHORITY_HOST
 DISCOVERY_HOST=$DISCOVERY_HOST
 BACKUP_HOST=$BACKUP_HOST
+PUSH_HOST=$PUSH_HOST
+PUSH_APNS_ENV=${PUSH_APNS_ENV:-production}
+PUSH_DEVICECHECK_ENV=${PUSH_DEVICECHECK_ENV:-production}
+PUSH_DEFAULT_RELAY=${PUSH_DEFAULT_RELAY:-wss://nostr.onym.app}
 BACKUP_COMPONENT_ID=${BACKUP_COMPONENT_ID:-onym:component:onym-backup}
 BACKUP_MAX_SNAPSHOT_BYTES=${BACKUP_MAX_SNAPSHOT_BYTES:-268435456}
 BACKUP_MAX_SNAPSHOTS=${BACKUP_MAX_SNAPSHOTS:-5}
@@ -467,6 +485,7 @@ CADDY_EMAIL=$CADDY_EMAIL
 # Empty in legacy mode; compose then falls back to the :local tags that
 # a droplet-side build produces.
 RELAYER_IMAGE=$RELAYER_IMAGE
+PUSH_IMAGE=$PUSH_IMAGE
 MODERATION_IMAGE=$MODERATION_IMAGE
 MODERATION_ANDROID_IMAGE=$MODERATION_ANDROID_IMAGE
 AUTHORITY_IMAGE=$AUTHORITY_IMAGE
@@ -474,6 +493,7 @@ BACKUP_IMAGE=$BACKUP_IMAGE
 EOF
 scp "${SSH_OPTS[@]}" "$RELAYER_ENV" "root@$DROPLET_IP:/opt/onym-infra/relayer.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$MODERATION_ENV" "root@$DROPLET_IP:/opt/onym-infra/moderation.env" >/dev/null
+scp "${SSH_OPTS[@]}" "$PUSH_ENV" "root@$DROPLET_IP:/opt/onym-infra/push.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$MODERATION_ANDROID_ENV" "root@$DROPLET_IP:/opt/onym-infra/moderation-android.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$AUTHORITY_ENV" "root@$DROPLET_IP:/opt/onym-infra/authority.env" >/dev/null
 scp "${SSH_OPTS[@]}" "$BACKUP_ENV" "root@$DROPLET_IP:/opt/onym-infra/backup.env" >/dev/null
@@ -685,6 +705,7 @@ check "https://$NOSTR_HOST/"   "nostr"     # expect 400/426 on plain GET = up
 # served bytes byte-for-byte; this stack only owes the vhost.
 check "https://$DISCOVERY_HOST/manifest.json" "discovery"
 check_health "https://$MODERATION_HOST/health" "moderation" "Check: docker compose logs moderation"
+check_health "https://$PUSH_HOST/healthz" "push" "Check: docker compose logs push"
 check_health "https://$MODERATION_ANDROID_HOST/health" "moderation-android" "Check: docker compose logs moderation-android"
 check_health "https://$AUTHORITY_HOST/health"  "authority"  "Check: docker compose logs authority"
 # The backup operator gets the same three checks as the authority, and
@@ -774,6 +795,7 @@ echo "  Nostr:      wss://$NOSTR_HOST"
 echo "  Blossom:    https://$BLOSSOM_HOST"
 echo "  Relayer:    https://$RELAYER_HOST"
 echo "  Moderation: https://$MODERATION_HOST"
+echo "  Push:       https://$PUSH_HOST"
 echo "  Moderation (Android): https://$MODERATION_ANDROID_HOST"
 echo "  Authority:  https://$AUTHORITY_HOST"
 echo "  Discovery:  https://$DISCOVERY_HOST (static; published by onym-discovery's Deploy workflow)"

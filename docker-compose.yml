@@ -63,6 +63,7 @@ services:
       - AUTHORITY_HOST=${AUTHORITY_HOST:-authority.onym.app}
       - DISCOVERY_HOST=${DISCOVERY_HOST:-discovery.onym.app}
       - BACKUP_HOST=${BACKUP_HOST:-backup.onym.app}
+      - PUSH_HOST=${PUSH_HOST:-push.onym.app}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # The authority's published policy documents, served under
@@ -90,7 +91,7 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     networks: [internal]
-    depends_on: [nostr-relay, blossom, relayer, moderation, moderation-android, authority, backup]
+    depends_on: [nostr-relay, blossom, relayer, moderation, moderation-android, authority, backup, push]
 
   nostr-relay:
     # Pinned deliberately. This was `:latest`, which had drifted — the
@@ -183,6 +184,39 @@ services:
       # the meaning behind every bit Apple is holding — the bits alone
       # cannot be reconstructed into verdicts — so back it up.
       - moderation-data:/data
+    networks: [internal]
+
+  # Push notification backend for onym-ios ("onym-push/apple"). It
+  # watches Nostr relays for registered inbox tags and asks Apple to
+  # wake devices with a content-free alert. It holds the APNs key, so
+  # like the enforcement backends it stays on the private network with
+  # no published port of its own.
+  push:
+    image: ${PUSH_IMAGE:-onym-infra-push:local}
+    build:
+      context: ./push/apple
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    mem_limit: 256m
+    # Secrets (the APNs .p8 and key/team ids, optionally a DeviceCheck
+    # key) live in push.env — never committed. See push.env.example.
+    env_file: ./push.env
+    environment:
+      # Bind on all interfaces inside the container so Caddy can reach
+      # it; the port is NOT published to the host.
+      - PUSH_BIND=0.0.0.0:8080
+      - PUSH_STORE_PATH=/data/push.sqlite
+      - PUSH_DATA_DIR=/data
+      - PUSH_APNS_ENV=${PUSH_APNS_ENV:-production}
+      - PUSH_DEVICECHECK_ENV=${PUSH_DEVICECHECK_ENV:-production}
+      - PUSH_DEFAULT_RELAY=${PUSH_DEFAULT_RELAY:-wss://nostr.onym.app}
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      # Encrypted push tokens, subscriptions, and the storage/envelope
+      # keys. Unlike the moderation store, nothing here is
+      # irreplaceable: losing the volume means devices re-register on
+      # their next refresh.
+      - push-data:/data
     networks: [internal]
 
   # The Android enforcement backend — the interface for
@@ -441,6 +475,7 @@ services:
 
 volumes:
   moderation-android-data:
+  push-data:
   caddy-data:
   caddy-config:
   strfry-data:
