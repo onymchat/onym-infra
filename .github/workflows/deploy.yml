@@ -170,6 +170,10 @@ jobs:
           PUSH_APNS_KEY_PEM: ${{ secrets.PUSH_APNS_KEY_PEM }}
           PUSH_APNS_KEY_ID: ${{ secrets.PUSH_APNS_KEY_ID }}
           PUSH_APNS_TEAM_ID: ${{ secrets.PUSH_APNS_TEAM_ID }}
+          # Android push backend: ONE Google service account with BOTH the
+          # Play Integrity and FCM scopes. Absent → registration-only,
+          # signature-gated service.
+          PUSH_GOOGLE_SA_KEY_JSON: ${{ secrets.PUSH_GOOGLE_SA_KEY_JSON }}
         run: |
           cat > .env <<EOF
           DO_API_KEY=$DO_API_KEY
@@ -184,6 +188,10 @@ jobs:
           DISCOVERY_HOST=${{ vars.DISCOVERY_HOST || 'discovery.onym.app' }}
           BACKUP_HOST=${{ vars.BACKUP_HOST || 'backup.onym.app' }}
           PUSH_HOST=${{ vars.PUSH_HOST || 'push.onym.app' }}
+          PUSH_ANDROID_HOST=${{ vars.PUSH_ANDROID_HOST || 'push-android.onym.app' }}
+          PUSH_FCM_PROJECT_ID=${{ vars.PUSH_FCM_PROJECT_ID }}
+          PUSH_PLAY_PACKAGE_NAME=${{ vars.PUSH_PLAY_PACKAGE_NAME || 'app.onym.android' }}
+          PUSH_PLAY_CERT_SHA256_DIGESTS=${{ vars.PUSH_PLAY_CERT_SHA256_DIGESTS }}
           BACKUP_COMPONENT_ID=${{ vars.BACKUP_COMPONENT_ID || 'onym:component:onym-backup' }}
           BACKUP_MAX_SNAPSHOT_BYTES=${{ vars.BACKUP_MAX_SNAPSHOT_BYTES || '268435456' }}
           BACKUP_MAX_SNAPSHOTS=${{ vars.BACKUP_MAX_SNAPSHOTS || '5' }}
@@ -257,6 +265,15 @@ jobs:
           PUSH_DEVICECHECK_KEY_PEM=$DEVICECHECK_KEY_PEM_ONE_LINE
           PUSH_DEVICECHECK_KEY_ID=$MODERATION_DEVICECHECK_KEY_ID
           PUSH_DEVICECHECK_TEAM_ID=$MODERATION_DEVICECHECK_TEAM_ID
+          EOF
+
+          # The Google SA key folded to one line (JSON whitespace outside
+          # strings is insignificant; the private_key's \n stay escaped
+          # inside the JSON string) — same trick as the Play SA key above.
+          PUSH_SA_ONE_LINE="${PUSH_GOOGLE_SA_KEY_JSON//$'\n'/}"
+          PUSH_SA_ONE_LINE="${PUSH_SA_ONE_LINE//$'\r'/}"
+          cat > push-android.env <<EOF
+          PUSH_GOOGLE_SA_KEY_JSON=$PUSH_SA_ONE_LINE
           EOF
 
           # An unset Android authority token would deploy green with a
